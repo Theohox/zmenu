@@ -118,7 +118,7 @@ cfg_load() {
     # shellcheck source=/dev/null
     source "$ZMENU_CONFIG_FILE"
     # Propagate config overrides to runtime variables
-    [[ -n "${ZMENU_ZENNY_BINARY:-}" ]] && ZENNY_BINARY="$ZMENU_ZENNY_BINARY"
+    if [[ -n "${ZMENU_ZENNY_BINARY:-}" ]]; then ZENNY_BINARY="$ZMENU_ZENNY_BINARY"; fi
 }
 
 cfg_edit() {
