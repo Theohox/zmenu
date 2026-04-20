@@ -30,7 +30,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.10.0"
+readonly ZMENU_VERSION="5.11.0"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
@@ -96,6 +96,19 @@ ZMENU_ZENNY_CHAT_MODEL=""
 
 # Editor for in-menu editing
 ZMENU_PREFERRED_EDITOR="${VISUAL:-${EDITOR:-nano}}"
+
+# Zenny-Core binary path — set to wherever you built/installed zenny-core
+# Default: ${HOME}/.local/bin/zenny-core
+# Build: cargo build --release --features vulkan  (in the zenny-core repo)
+ZMENU_ZENNY_BINARY="${HOME}/.local/bin/zenny-core"
+
+# GPU gfx ID override — use if rocminfo reports the wrong ID for your GPU
+# Strix Halo (Radeon 8060S): rocminfo reports gfx1100, real die is gfx1151
+# Set this to force the correct ID:  ZMENU_GPU_GFX_OVERRIDE=gfx1151
+ZMENU_GPU_GFX_OVERRIDE=""
+
+# Machine label shown in AI system prompts and wiki (defaults to hostname if empty)
+ZMENU_MACHINE_LABEL=""
 EOF
     echo -e "  ${BGRN}✓${NC}  Config created: ${ZMENU_CONFIG_FILE}"
 }
@@ -104,6 +117,8 @@ cfg_load() {
     cfg_init
     # shellcheck source=/dev/null
     source "$ZMENU_CONFIG_FILE"
+    # Propagate config overrides to runtime variables
+    [[ -n "${ZMENU_ZENNY_BINARY:-}" ]] && ZENNY_BINARY="$ZMENU_ZENNY_BINARY"
 }
 
 cfg_edit() {
@@ -345,11 +360,18 @@ _disc_gpu() {
     # Try ROCm (AMD)
     if command -v rocm-smi >/dev/null 2>&1; then
         D_GPU_DRIVER="rocm"
-        # rocminfo reports gfx1100 for Strix Halo — the real ID is gfx1151.
-        # Always override: this machine has Radeon 8060S (gfx1151).
         local _raw_gfx; _raw_gfx=$(rocminfo 2>/dev/null \
             | grep -i "gfx" | head -1 | grep -o 'gfx[0-9a-f]*' || echo "unknown")
-        [[ "$_raw_gfx" == "gfx1100" ]] && D_GPU_GFX="gfx1151" || D_GPU_GFX="$_raw_gfx"
+        # Config override takes priority; otherwise auto-fix Strix Halo: rocminfo reports
+        # gfx1100 for this die family but the real ID is gfx1151. Set ZMENU_GPU_GFX_OVERRIDE
+        # in ~/.zmenu/config if you need a different value.
+        if [[ -n "${ZMENU_GPU_GFX_OVERRIDE:-}" ]]; then
+            D_GPU_GFX="$ZMENU_GPU_GFX_OVERRIDE"
+        elif [[ "$_raw_gfx" == "gfx1100" ]]; then
+            D_GPU_GFX="gfx1151"  # Strix Halo: rocminfo bug — real die is gfx1151
+        else
+            D_GPU_GFX="$_raw_gfx"
+        fi
         D_GPU_TEMP=$(rocm-smi --showtemp 2>/dev/null \
             | awk '/GPU\[0\]/{print $NF}' | head -1 || echo "?")
         D_GPU_USE=$(rocm-smi --showuse 2>/dev/null \
@@ -639,7 +661,7 @@ OPENCODE_BIN="${HOME}/.opencode/bin/opencode"
 OPENCODE_PROCESS="opencode"
 OPENCODE_CFG="${HOME}/.config/opencode"
 
-ZENNY_BINARY="${HOME}/projects/my-assistant/zenny-core/target/release/zenny-core"
+ZENNY_BINARY="${HOME}/.local/bin/zenny-core"
 ZENNY_PROCESS="zenny-core"
 ZENNY_LOG="/tmp/zenny-core.log"
 
@@ -921,25 +943,26 @@ $(grep -A3 '^## ' "${ZMENU_WIKI_DIR}/changes.md" | tail -30)"
 
     # Build full system prompt — hardware facts FIRST so they are never
     # truncated even with small context windows, then scoped context
-    local _gpu_gfx="${D_GPU_GFX:-gfx1151}"
+    local _gpu_gfx="${D_GPU_GFX:-unknown}"
     local _gpu_temp="${D_GPU_TEMP:-?}"
     local _gpu_use="${D_GPU_USE:-?}"
-    local _mem_total="${D_MEM_TOTAL_MB:-131072}"
+    local _mem_total="${D_MEM_TOTAL_MB:-?}"
     local _mem_used="${D_MEM_USED_MB:-?}"
-    local _npu_driver="${D_NPU_DRIVER:-amdxdna}"
-    local _npu_device="${D_NPU_DEVICE:-/dev/accel0}"
-    local _hsa="${HSA_OVERRIDE_GFX_VERSION:-11.5.1}"
+    local _npu_driver="${D_NPU_DRIVER:-unknown}"
+    local _npu_device="${D_NPU_DEVICE:-unknown}"
+    local _hsa="${HSA_OVERRIDE_GFX_VERSION:-not set}"
+    local _machine="${ZMENU_MACHINE_LABEL:-$(hostname 2>/dev/null || echo 'this machine')}"
+    local _os; _os=$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-Linux}" || uname -sr)
 
     local sys_prompt
     sys_prompt="## MACHINE FACTS — read these first, do not contradict them
-Machine:        HP ZBook Ultra 14 G1a — Ubuntu 24.04
-CPU:            AMD Ryzen AI MAX+ PRO 395 (16 cores / 32 threads, x86_64)
-RAM:            ${_mem_total} MB LPDDR5 @ 8000 MT/s — unified pool (GPU+CPU share this)
-GPU:            Radeon 8060S — REAL gfx ID: gfx1151 (rocminfo may show gfx1100 — ignore that)
-GPU note:       Strix Halo (gfx1151). Inference via Vulkan (Zenny-Core), NOT ROCm/Ollama.
-GPU reported:   ${_gpu_gfx}  temp: ${_gpu_temp}°C  util: ${_gpu_use}%
-NPU:            ${_npu_driver}  ${_npu_device}  (XDNA — not used for inference)
-AI backend:     ${AI_BACKEND_LABEL}  (model: ${ZMENU_AI_MODEL})
+Machine:        ${_machine} — ${_os}
+CPU:            ${D_CPU_MODEL:-unknown} (${D_CPU_CORES:-?} cores, x86_64)
+RAM:            ${_mem_total} MB — unified pool (GPU+CPU share this)
+GPU:            ${_gpu_gfx}  driver: ${D_GPU_DRIVER:-unknown}
+GPU-volatile:   temp: ${_gpu_temp}°C  util: ${_gpu_use}%
+NPU:            ${_npu_driver}  ${_npu_device}
+AI backend:     ${AI_BACKEND_LABEL}  (model: ${ZMENU_AI_MODEL:-auto})
 RAM used:       ${_mem_used} MB of ${_mem_total} MB
 
 ## Section: ${section_title}
@@ -1531,12 +1554,10 @@ _wiki_full_refresh() {
     # ── hardware.md ─────────────────────────────────────────
     {
         printf "# Hardware — %s\n\n" "$ts"
-        printf "Machine:     HP ZBook Ultra 14 G1a — Ubuntu 24.04\n"
-        printf "CPU:         %s (%s cores/threads)\n" "${D_CPU_MODEL:-Ryzen AI MAX+ PRO 395}" "${D_CPU_CORES:-32}"
-        printf "GPU:         Radeon 8060S — REAL gfx ID: gfx1151\n"
-        printf "             Strix Halo — Vulkan inference (Zenny-Core), NOT ROCm\n"
-        printf "             Note: rocminfo/lspci may report gfx1100 — ignore that\n"
-        printf "GPU-volatile: %s  temp: %s°C  util: %s%%\n" "${D_GPU_GFX:-?}" "${D_GPU_TEMP:-?}" "${D_GPU_USE:-?}"
+        printf "Machine:     %s\n" "${ZMENU_MACHINE_LABEL:-$(hostname 2>/dev/null)}"
+        printf "CPU:         %s (%s cores/threads)\n" "${D_CPU_MODEL:-unknown}" "${D_CPU_CORES:-?}"
+        printf "GPU:         %s  driver: %s\n" "${D_GPU_GFX:-unknown}" "${D_GPU_DRIVER:-none}"
+        printf "GPU-volatile: temp: %s°C  util: %s%%\n" "${D_GPU_TEMP:-?}" "${D_GPU_USE:-?}"
         printf "NPU:         %s  %s  (XDNA — not used for inference)\n" "${D_NPU_DRIVER:-amdxdna}" "${D_NPU_DEVICE:-accel0}"
         printf "RAM:         %s MB LPDDR5 @ 8000 MT/s — unified pool (GPU+CPU share)\n" "${D_MEM_TOTAL_MB:-131072}"
         printf "RAM-current: %s MB used / %s MB\n" "${D_MEM_USED_MB:-?}" "${D_MEM_TOTAL_MB:-?}"
@@ -1560,7 +1581,7 @@ _wiki_full_refresh() {
         printf "# AI Stack — %s\n\n" "$ts"
         printf "## Primary: Zenny-Core\n"
         printf "Status:    %s\n" "$($D_ZENNY_RUNNING && echo "RUNNING  pid: ${D_ZENNY_PID:-?}  socket: ${D_ZENNY_SOCKET}" || echo 'stopped')"
-        printf "Binary:    %s/projects/my-assistant/zenny-core/target/release/zenny-core\n" "${HOME}"
+        printf "Binary:    %s\n" "${ZENNY_BINARY}"
         printf "Models (%s available):\n" "${#D_ZENNY_MODELS[@]}"
         for i in "${!D_ZENNY_MODELS[@]}"; do
             printf "  [%s] display: %s\n" "$i" "${D_ZENNY_MODELS[$i]:-?}"
@@ -1569,7 +1590,7 @@ _wiki_full_refresh() {
         printf "\nActive backend:  %s\n" "${AI_BACKEND_LABEL:-none}"
         printf "Active model:    %s\n\n" "${ZMENU_AI_MODEL:-auto}"
         printf "## GPU for Inference\n"
-        printf "Device:  Radeon 8060S (gfx1151/Strix Halo)\n"
+        printf "Device:  %s  driver: %s\n" "${D_GPU_GFX:-unknown}" "${D_GPU_DRIVER:-none}"
         printf "Backend: Vulkan  HSA_OVERRIDE_GFX_VERSION=%s\n" "${HSA_OVERRIDE_GFX_VERSION:-NOT SET — required!}"
         printf "\n## Other Tools\n"
         printf "OpenCode:    %s\n" "$(pgrep -x "$OPENCODE_PROCESS" >/dev/null 2>&1 && echo "RUNNING (pid: $(pgrep -x "$OPENCODE_PROCESS" | head -1))" || (_opencode_available 2>/dev/null && echo 'installed (not running)' || echo 'not installed'))"
@@ -1759,10 +1780,10 @@ _wiki_full_refresh() {
     # ── general.md — fallback for unrecognised sections ─────
     {
         printf "# General — %s\n\n" "$ts"
-        printf "Machine:    HP ZBook Ultra 14 G1a — Ubuntu 24.04\n"
-        printf "AI engine:  Zenny-Core (Vulkan/llama.cpp, Unix socket)\n"
-        printf "GPU:        Radeon 8060S (gfx1151/Strix Halo)\n"
-        printf "RAM:        %s MB unified LPDDR5\n" "${D_MEM_TOTAL_MB:-131072}"
+        printf "Machine:    %s\n" "${ZMENU_MACHINE_LABEL:-$(hostname 2>/dev/null)}"
+        printf "AI engine:  %s\n" "${AI_BACKEND_LABEL:-none}"
+        printf "GPU:        %s  driver: %s\n" "${D_GPU_GFX:-unknown}" "${D_GPU_DRIVER:-none}"
+        printf "RAM:        %s MB unified\n" "${D_MEM_TOTAL_MB:-?}"
         printf "Backend:    %s  model: %s\n" "${AI_BACKEND_LABEL:-none}" "${ZMENU_AI_MODEL:-auto}"
         printf "\nZenny-Core: %s\n" "$($D_ZENNY_RUNNING && echo "RUNNING pid:${D_ZENNY_PID:-?}" || echo 'stopped')"
         printf "Wiki dir:   %s\n" "${ZMENU_WIKI_DIR}"
@@ -2987,7 +3008,7 @@ _zenny_systemd_install() {
     echo ""
     if [[ ! -x "$ZENNY_BINARY" ]]; then
         echo -e "  ${FAIL}  Binary not found: ${ZENNY_BINARY}"
-        echo -e "  ${DIM}  Build first: cd ~/projects/my-assistant/zenny-core && cargo build --release --features vulkan${NC}"
+        echo -e "  ${DIM}  Build: cargo build --release --features vulkan, then set ZMENU_ZENNY_BINARY in ~/.zmenu/config${NC}"
         return
     fi
     if systemctl is-active --quiet "$_ZENNY_SERVICE" 2>/dev/null; then
@@ -3184,6 +3205,7 @@ _ai_sub_ollama() {
     while true; do
         header
         echo -e "${BCYN}┄ OLLAMA ───────────────────────────────────────────────${NC}"
+        echo -e "  ${WARN}  ${DIM}Legacy backend — replaced by Zenny-Core (Vulkan). Settings preserved for reference.${NC}"
         echo ""
 
         if [[ "$D_OLLAMA_RUNNING" == true ]]; then
@@ -3325,8 +3347,8 @@ _ai_ollama_settings() {
         printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_MAX_LOADED_MODELS" "${v_maxm}" "Max models in RAM simultaneously"
         printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_NOPRUNE" "${v_noprune}" "Prevent auto-deletion of model files (1=on)"
         echo ""
-        echo -e "  ${BOLD}── GPU / ROCm (ZBook gfx1151) ───────────────────────${NC}"
-        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "HSA_OVERRIDE_GFX_VERSION" "${v_hsa}" "CRITICAL: must be 11.5.1 for gfx1151"
+        echo -e "  ${BOLD}── GPU / ROCm (${D_GPU_GFX:-unknown}) ───────────────────────${NC}"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "HSA_OVERRIDE_GFX_VERSION" "${v_hsa}" "CRITICAL: must match your GPU gfx ID (gfx1151 → 11.5.1)"
         printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "ROCR_VISIBLE_DEVICES" "${v_rocr}" "Pin to GPU 0 (unified memory)"
         echo ""
         echo -e "  ${BOLD}── Privacy / Debug ──────────────────────────────────${NC}"
@@ -3558,11 +3580,11 @@ _ai_set_hsa_gfx() {
     echo -e "${BCYN}┄ HSA_OVERRIDE_GFX_VERSION${NC}"
     echo ""
     echo "  Tells ROCm which GPU architecture to target."
-    echo "  Your GPU (gfx1151) is not in ROCm's official support table."
-    echo "  This override tells ROCm to treat it as 11.5.1 — required for GPU inference."
+    echo "  Your GPU (${D_GPU_GFX:-unknown}) may not be in ROCm's official support table."
+    echo "  This override tells ROCm which architecture to target — required for GPU inference."
     echo "  Without this, Ollama falls back to CPU (10× slower)."
     echo ""
-    echo "   1)  11.5.1  — correct for gfx1151 / Radeon 8060S (ZBook)"
+    echo "   1)  11.5.1  — correct for gfx1151 (Strix Halo / Radeon 8060S)"
     echo "   2)  custom  — enter manually"
     echo ""
     read -rp "  Select (1-2): " n
@@ -3692,7 +3714,7 @@ _ai_apply_zbook_profile() {
     echo -e "${BCYN}┄ APPLY ZBOOK RECOMMENDED PROFILE${NC}"
     echo ""
     echo "  This will write the full recommended configuration for:"
-    echo "  HP ZBook Ultra 14 G1a / gfx1151 / 128 GB unified memory"
+    echo "  ${ZMENU_MACHINE_LABEL:-this machine} (${D_GPU_GFX:-unknown} / ${D_MEM_TOTAL_MB:-?} MB unified memory)"
     echo ""
     echo -e "  ${BYEL}Settings to be applied:${NC}"
     echo "    OLLAMA_HOST              = 0.0.0.0"
@@ -4046,7 +4068,7 @@ _ai_sub_owui() {
 # port: listening port to verify (empty = skip)
 _SCAN_REGISTRY=(
     # ── AI Inference ────────────────────────────────────────
-    "Zenny-Core|${ZENNY_BINARY}|${ZENNY_PROCESS}||unix:${D_ZENNY_SOCKET}|~/projects/my-assistant/zenny-core|ai-inference|Local LLM inference engine (Vulkan/llama.cpp, Unix socket)"
+    "Zenny-Core|${ZENNY_BINARY}|${ZENNY_PROCESS}||unix:${D_ZENNY_SOCKET}|${ZENNY_BINARY}|ai-inference|Local LLM inference engine (Vulkan/llama.cpp, Unix socket)"
     "Ollama|ollama|ollama|ollama.service|11434|~/.ollama|ai-inference|HTTP-based LLM server (legacy — replaced by Zenny-Core)"
     "LM Studio||lmstudio||1234|~/.lmstudio|ai-inference|GUI model downloader and inference server"
     # ── AI Tools ────────────────────────────────────────────
@@ -4777,7 +4799,7 @@ mod_hardware() {
         read -rp "  Selection: " ch
         case $ch in
             a) _sys_resources; pause ;;
-            b) htop 2>/dev/null || top ;;
+            b) htop 2>/dev/null || top; pause ;;
             c) _sys_thermal; pause ;;
             d) _sys_hardware; pause ;;
             e) _sys_power; pause ;;
@@ -5424,6 +5446,7 @@ _priv_tailscale() {
         b) sudo systemctl disable tailscaled && echo -e "  ${OK}  Disabled" || echo -e "  ${FAIL}  Failed"; pause ;;
         c) sudo systemctl stop tailscaled && sudo systemctl disable tailscaled && echo -e "  ${OK}  Done" || echo -e "  ${FAIL}  Failed"; pause ;;
         d) sudo systemctl start tailscaled && echo -e "  ${OK}  Started" || echo -e "  ${FAIL}  Failed"; pause ;;
+        r|R) return ;;
     esac
 }
 
@@ -5460,7 +5483,7 @@ _priv_lockdown() {
     echo "   r)  Back"
     echo ""
     read -rp "  Selection: " ch
-    case $ch in a) _priv_lockdown_guided ;; b) _priv_lockdown_oneshot ;; esac
+    case $ch in a) _priv_lockdown_guided ;; b) _priv_lockdown_oneshot ;; r|R) return ;; esac
 }
 
 _priv_lockdown_guided() {
@@ -5798,8 +5821,8 @@ _ai_backend_picker() {
         header
         echo -e "${BCYN}┄ AI BACKEND ───────────────────────────────────────────${NC}"
         echo ""
-        echo -e "  Preference:  ${BOLD}${ZMENU_AI_BACKEND:-auto}${NC}"
-        echo -e "  Active now:  ${BOLD}${AI_BACKEND_LABEL:-none}${NC}"
+        echo -e "  Preference:  ${BOLD}${ZMENU_AI_BACKEND:-auto}${NC}  ${DIM}(saved to ~/.zmenu/config)${NC}"
+        echo -e "  Active now:  ${BOLD}${AI_BACKEND_LABEL:-none}${NC}  ${DIM}(runtime status — see AI Engine module)${NC}"
         echo ""
 
         local z_status oc_status ol_status
