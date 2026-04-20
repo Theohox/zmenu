@@ -1,0 +1,3658 @@
+#!/usr/bin/env bash
+# ============================================================
+#  Z-MENU  v5.0.0
+#  Local Sovereign Dashboard
+#
+#  INSTALL:   chmod +x zmenu.sh && sudo cp zmenu.sh /usr/local/bin/zmenu
+#  RUN:       zmenu
+#  HEADLESS:  zmenu --run <function_name>
+#
+#  v5.0.0 — Full rewrite:
+#    • Dashboard home screen with green/yellow/red status at a glance
+#    • Find Problems module — full bottleneck sweep with plain English fixes
+#    • Export from any screen (press E → ~/zmenu-report.md)
+#    • 8 menu sections grouped by what affects what
+#    • Settings merged from old modules 8+9
+#    • Portable — auto-detect hardware, no hardcoded values
+#    • Back buttons + Ask AI on every screen
+#
+#  Architecture:
+#    1. Config       — ~/.zmenu/config (sourced, user-editable)
+#    2. Discovery    — runs once at startup, populates all state
+#    3. Chrome       — header, pause, confirm, status dashboard
+#    4. Context/AI   — context generator + AI launcher
+#    5. Export       — E) on any screen saves markdown report
+#    6. Modules      — 8 sections, each self-contained
+#    7. Main Menu    — top-level loop
+#    8. Entrypoint   — bootstrap, CLI args
+# ============================================================
+
+set -euo pipefail
+
+# ── Version ────────────────────────────────────────────────
+readonly ZMENU_VERSION="5.0.0"
+readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
+readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
+
+# ── Config directory & defaults ────────────────────────────
+ZMENU_CONFIG_DIR="${HOME}/.zmenu"
+ZMENU_CONFIG_FILE="${ZMENU_CONFIG_DIR}/config"
+ZMENU_CONTEXT_FILE="/tmp/zmenu-context.md"
+ZMENU_ERROR_LOG="/tmp/zmenu-errors.log"
+ZMENU_REPORT_FILE="${HOME}/zmenu-report.md"
+
+# Default config values — overridden by config file
+ZMENU_PROJECTS_DIR="${HOME}/projects"
+ZMENU_AI_MODEL=""          # empty = auto-select best available
+ZMENU_AI_CONTEXT_LENGTH=8192
+ZMENU_PREFERRED_EDITOR="${VISUAL:-${EDITOR:-nano}}"
+ZMENU_HEADLESS="${ZMENU_HEADLESS:-0}"
+
+# ── Colours ────────────────────────────────────────────────
+RED='\033[0;31m'; GRN='\033[0;32m'; YEL='\033[1;33m'
+BLU='\033[0;34m'; CYN='\033[0;36m'; WHT='\033[0;37m'
+BRED='\033[1;31m'; BGRN='\033[1;32m'; BYEL='\033[1;33m'
+BBLU='\033[1;34m'; BCYN='\033[1;36m'; BWHT='\033[1;37m'
+BBLK='\033[1;30m'; DIM='\033[2m'; BOLD='\033[1m'; NC='\033[0m'
+
+OK="${BGRN}●${NC}"
+FAIL="${BRED}●${NC}"
+WARN="${BYEL}●${NC}"
+IDLE="${BBLK}●${NC}"
+
+# ── Error trap ─────────────────────────────────────────────
+trap '_on_err $LINENO' ERR
+_on_err() { echo "[$(date '+%H:%M:%S')] ERR line $1: $BASH_COMMAND" >> "$ZMENU_ERROR_LOG"; }
+
+# ============================================================
+#  SECTION 1 — CONFIG
+# ============================================================
+
+cfg_init() {
+    mkdir -p "$ZMENU_CONFIG_DIR"
+    [[ -f "$ZMENU_CONFIG_FILE" ]] && return
+    cat > "$ZMENU_CONFIG_FILE" << 'EOF'
+# Z-Menu Configuration
+# Edit directly or via zmenu → Settings → Edit Config
+
+# Directory scanned for projects
+ZMENU_PROJECTS_DIR="${HOME}/projects"
+
+# Preferred model for AI sessions (leave empty to auto-select)
+ZMENU_AI_MODEL=""
+
+# Context window size for AI sessions (num_ctx sent to Ollama)
+# Recommended: 8192 (fast) | 16384 (balanced) | 32768 (long docs)
+ZMENU_AI_CONTEXT_LENGTH=8192
+
+# Editor for in-menu editing
+ZMENU_PREFERRED_EDITOR="${VISUAL:-${EDITOR:-nano}}"
+EOF
+    echo -e "  ${BGRN}✓${NC}  Config created: ${ZMENU_CONFIG_FILE}"
+}
+
+cfg_load() {
+    cfg_init
+    # shellcheck source=/dev/null
+    source "$ZMENU_CONFIG_FILE"
+}
+
+cfg_edit() {
+    ${ZMENU_PREFERRED_EDITOR} "$ZMENU_CONFIG_FILE"
+    cfg_load
+}
+
+# ============================================================
+#  SECTION 2 — DISCOVERY ENGINE
+#  Runs once at startup. Populates D_* variables.
+#  Never assumes — always probes. Portable across Linux systems.
+# ============================================================
+
+# Discovered state — all empty until discover() runs
+D_OLLAMA_URL=""
+D_OLLAMA_RUNNING=false
+D_OLLAMA_ACTIVE_MODEL=""
+D_OLLAMA_MODELS=()
+D_OLLAMA_TOOL_MODELS=()
+
+D_LMS_URL=""
+D_LMS_RUNNING=false
+D_LMS_MODELS=()
+
+D_AI_BIN=""
+D_AI_VER=""
+D_AI_RUNNING=false
+
+D_DOCKER_RUNNING=false
+D_CONTAINERS=()
+
+D_GPU_DRIVER=""             # rocm | amdgpu-sysfs | nvidia | none
+D_GPU_GFX=""                # e.g. gfx1151
+D_GPU_TEMP=""
+D_GPU_USE=""
+D_GPU_VRAM_USED=""
+D_GPU_VRAM_TOTAL=""
+
+D_NPU_DRIVER=""             # amdxdna | none
+D_NPU_DEVICE=""
+
+D_CPU_MODEL=""
+D_CPU_CORES=""
+D_CPU_GOVERNOR=""
+D_MEM_TOTAL_MB=""
+D_MEM_USED_MB=""
+D_MEM_FREE_MB=""
+D_SWAP_TOTAL_MB=""
+D_SWAP_USED_MB=""
+
+D_SERVICES=()
+D_OPEN_PORTS=()
+
+discover() {
+    _disc_cpu
+    _disc_memory
+    _disc_ollama
+    _disc_lms
+    _disc_ai_tool
+    _disc_docker
+    _disc_gpu
+    _disc_npu
+    _disc_services
+    _disc_ports
+    _sel_ai_model
+}
+
+# ── CPU ────────────────────────────────────────────────────
+_disc_cpu() {
+    D_CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | sed 's/model name\s*:\s*//' || echo "unknown")
+    D_CPU_CORES=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "?")
+    # Governor (first core)
+    D_CPU_GOVERNOR=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
+}
+
+# ── Memory ─────────────────────────────────────────────────
+_disc_memory() {
+    read -r D_MEM_TOTAL_MB D_MEM_USED_MB D_MEM_FREE_MB < <(free -m | awk '/^Mem/{print $2,$3,$7}')
+    read -r D_SWAP_TOTAL_MB D_SWAP_USED_MB < <(free -m | awk '/^Swap/{print $2,$3}')
+}
+
+# ── Ollama ─────────────────────────────────────────────────
+_disc_ollama() {
+    local candidates=(11434 11435 11436)
+    for port in "${candidates[@]}"; do
+        local url="http://localhost:${port}"
+        if curl -sf --max-time 1 "${url}/api/tags" >/dev/null 2>&1; then
+            D_OLLAMA_URL="$url"
+            D_OLLAMA_RUNNING=true
+            break
+        fi
+    done
+    [[ "$D_OLLAMA_RUNNING" == false ]] && return
+
+    # Active model
+    local ps
+    ps=$(curl -sf --max-time 2 "${D_OLLAMA_URL}/api/ps" 2>/dev/null || echo "")
+    D_OLLAMA_ACTIVE_MODEL=$(echo "$ps" \
+        | grep -o '"name":"[^"]*"' | head -1 \
+        | sed 's/"name":"//;s/"//' || echo "")
+
+    # All models
+    local tags
+    tags=$(curl -sf --max-time 3 "${D_OLLAMA_URL}/api/tags" 2>/dev/null || echo "")
+    while IFS= read -r name; do
+        [[ -n "$name" ]] && D_OLLAMA_MODELS+=("$name")
+    done < <(echo "$tags" | grep -o '"name":"[^"]*"' | sed 's/"name":"//;s/"//')
+
+    # Tool-capable models (skip if ollama binary not found)
+    if command -v ollama >/dev/null 2>&1; then
+        for m in "${D_OLLAMA_MODELS[@]}"; do
+            if ollama show "$m" 2>/dev/null | grep -qi "tools"; then
+                D_OLLAMA_TOOL_MODELS+=("$m")
+            fi
+        done
+    fi
+}
+
+# ── LM Studio ──────────────────────────────────────────────
+_disc_lms() {
+    local candidates=(1234 1235 8080)
+    for port in "${candidates[@]}"; do
+        local url="http://localhost:${port}"
+        if curl -sf --max-time 1 "${url}/v1/models" >/dev/null 2>&1; then
+            D_LMS_URL="$url"
+            D_LMS_RUNNING=true
+            break
+        fi
+    done
+    [[ "$D_LMS_RUNNING" == false ]] && return
+    local resp
+    resp=$(curl -sf --max-time 3 "${D_LMS_URL}/v1/models" 2>/dev/null || echo "")
+    while IFS= read -r id; do
+        [[ -n "$id" ]] && D_LMS_MODELS+=("$id")
+    done < <(echo "$resp" | grep -o '"id":"[^"]*"' | sed 's/"id":"//;s/"//')
+}
+
+# ── Local AI tool (Ollama binary) ──────────────────────────
+_disc_ai_tool() {
+    D_AI_BIN=$(command -v ollama 2>/dev/null || echo "")
+    [[ -z "$D_AI_BIN" ]] && return
+    D_AI_RUNNING=true
+    D_AI_VER=$(ollama --version 2>/dev/null \
+        | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1 || echo "?")
+}
+
+# ── Docker ─────────────────────────────────────────────────
+_disc_docker() {
+    export DOCKER_HOST="${DOCKER_HOST:-unix:///run/docker.sock}"
+    docker info >/dev/null 2>&1 || return
+    D_DOCKER_RUNNING=true
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && D_CONTAINERS+=("$line")
+    done < <(docker ps --format "{{.Names}}:{{.Status}}" 2>/dev/null || true)
+}
+
+# ── GPU (portable: AMD ROCm → AMD sysfs → Nvidia → none) ──
+_disc_gpu() {
+    # Try ROCm (AMD)
+    if command -v rocm-smi >/dev/null 2>&1; then
+        D_GPU_DRIVER="rocm"
+        D_GPU_GFX=$(rocminfo 2>/dev/null \
+            | grep -i "gfx" | head -1 | grep -o 'gfx[0-9a-f]*' || echo "unknown")
+        D_GPU_TEMP=$(rocm-smi --showtemp 2>/dev/null \
+            | awk '/GPU\[0\]/{print $NF}' | head -1 || echo "?")
+        D_GPU_USE=$(rocm-smi --showuse 2>/dev/null \
+            | awk '/GPU\[0\]/{print $NF}' | head -1 || echo "?")
+        # VRAM info
+        local vram_out
+        vram_out=$(rocm-smi --showmeminfo vram 2>/dev/null || true)
+        D_GPU_VRAM_USED=$(echo "$vram_out" | awk '/Used/{gsub(/[^0-9]/,"",$NF); print $NF}' | head -1 || echo "")
+        D_GPU_VRAM_TOTAL=$(echo "$vram_out" | awk '/Total/{gsub(/[^0-9]/,"",$NF); print $NF}' | head -1 || echo "")
+        return
+    fi
+    # Try Nvidia
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        D_GPU_DRIVER="nvidia"
+        D_GPU_TEMP=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "?")
+        D_GPU_USE=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "?")
+        D_GPU_GFX=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo "unknown")
+        return
+    fi
+    # Fallback: AMD sysfs
+    for d in /sys/class/hwmon/hwmon*; do
+        local n; n=$(cat "$d/name" 2>/dev/null || echo "")
+        if [[ "$n" == *amdgpu* ]]; then
+            D_GPU_DRIVER="amdgpu-sysfs"
+            local tf; tf=$(ls "$d"/temp*_input 2>/dev/null | head -1)
+            [[ -f "$tf" ]] && D_GPU_TEMP=$(awk '{printf "%.0f", $1/1000}' "$tf")
+            return
+        fi
+    done
+}
+
+# ── NPU ────────────────────────────────────────────────────
+_disc_npu() {
+    for mod in amdxdna ryzen_ai npu amd_ipu; do
+        if lsmod 2>/dev/null | grep -qi "$mod"; then
+            D_NPU_DRIVER="$mod"
+            D_NPU_DEVICE=$(ls /dev/accel* 2>/dev/null | head -1 || echo "no-device")
+            return
+        fi
+    done
+}
+
+# ── Systemd services ───────────────────────────────────────
+_disc_services() {
+    local units
+    units=$(systemctl list-units --type=service --state=active \
+        --no-legend --no-pager 2>/dev/null \
+        | awk '{print $1}' || true)
+    local keywords=("ollama" "docker" "n8n" "lmstudio" "rocm" "amd" "containerd" "open-webui")
+    for svc in $units; do
+        for kw in "${keywords[@]}"; do
+            if [[ "$svc" == *"$kw"* ]]; then
+                D_SERVICES+=("$svc")
+                break
+            fi
+        done
+    done
+}
+
+# ── Listening ports ────────────────────────────────────────
+_disc_ports() {
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && D_OPEN_PORTS+=("$line")
+    done < <(ss -tlnp 2>/dev/null \
+        | awk 'NR>1 {match($4, /[0-9]+$/, a); if(a[0]!="") print a[0]":"$6}' \
+        | sort -t: -k1 -n || true)
+}
+
+# ── Select best Ollama model ──────────────────────────────
+_sel_ai_model() {
+    if [[ -n "$ZMENU_AI_MODEL" ]]; then
+        for m in "${D_OLLAMA_MODELS[@]}"; do
+            [[ "$m" == "$ZMENU_AI_MODEL" ]] && return
+        done
+    fi
+    if [[ ${#D_OLLAMA_TOOL_MODELS[@]} -gt 0 ]]; then
+        ZMENU_AI_MODEL="${D_OLLAMA_TOOL_MODELS[0]}"
+        return
+    fi
+    if [[ ${#D_OLLAMA_MODELS[@]} -gt 0 ]]; then
+        ZMENU_AI_MODEL="${D_OLLAMA_MODELS[0]}"
+        return
+    fi
+    ZMENU_AI_MODEL="no-models-found"
+}
+
+# ============================================================
+#  SECTION 3 — CONTEXT GENERATOR
+# ============================================================
+
+context_generate() {
+    {
+        echo "# Z-Menu Live System Context"
+        echo "> Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+
+        echo "## Machine"
+        echo '```'
+        echo "CPU: ${D_CPU_MODEL} (${D_CPU_CORES} threads)"
+        echo "Governor: ${D_CPU_GOVERNOR}"
+        free -h | awk '/^Mem/{printf "RAM: %s total, %s used, %s free\n",$2,$3,$7}'
+        free -h | awk '/^Swap/{printf "Swap: %s total, %s used\n",$2,$3}'
+        df -h / | awk 'NR==2{printf "Disk: %s used / %s total (%s full, %s free)\n",$3,$2,$5,$4}'
+        awk '{printf "Load: %s %s %s\n",$1,$2,$3}' /proc/loadavg
+        uptime -p 2>/dev/null || true
+        echo '```'
+        echo ""
+
+        echo "## AI Inference Stack"
+        echo '```'
+        if [[ "$D_OLLAMA_RUNNING" == true ]]; then
+            echo "Ollama: RUNNING at ${D_OLLAMA_URL}"
+            echo "Active model: ${D_OLLAMA_ACTIVE_MODEL:-none loaded}"
+            echo "Available models:"
+            for m in "${D_OLLAMA_MODELS[@]}"; do echo "  - $m"; done
+            echo "Tool-capable models:"
+            if [[ ${#D_OLLAMA_TOOL_MODELS[@]} -gt 0 ]]; then
+                for m in "${D_OLLAMA_TOOL_MODELS[@]}"; do echo "  - $m"; done
+            else
+                echo "  - none detected"
+            fi
+        else
+            echo "Ollama: STOPPED"
+        fi
+        echo ""
+        if [[ "$D_LMS_RUNNING" == true ]]; then
+            echo "LM Studio: RUNNING at ${D_LMS_URL}"
+            for m in "${D_LMS_MODELS[@]}"; do echo "  - $m"; done
+        else
+            echo "LM Studio: not running"
+        fi
+        echo ""
+        if [[ "$D_AI_RUNNING" == true ]]; then
+            echo "Ollama binary: v${D_AI_VER}"
+            echo "Selected model: ${ZMENU_AI_MODEL}"
+            echo "Context window: ${ZMENU_AI_CONTEXT_LENGTH}"
+        else
+            echo "Ollama binary: not found"
+        fi
+        echo '```'
+        echo ""
+
+        echo "## GPU"
+        echo '```'
+        echo "Driver: ${D_GPU_DRIVER:-none}"
+        echo "GFX: ${D_GPU_GFX:-unknown}"
+        [[ -n "$D_GPU_TEMP" ]] && echo "Temp: ${D_GPU_TEMP}°C"
+        [[ -n "$D_GPU_USE" ]] && echo "Utilisation: ${D_GPU_USE}%"
+        if [[ "$D_GPU_DRIVER" == "rocm" ]]; then
+            rocm-smi --showmeminfo vram 2>/dev/null | grep -E "Used|Total" | head -4 || true
+        fi
+        echo '```'
+        echo ""
+
+        echo "## NPU"
+        echo '```'
+        echo "Driver: ${D_NPU_DRIVER:-none}"
+        echo "Device: ${D_NPU_DEVICE:-not found}"
+        echo '```'
+        echo ""
+
+        echo "## Docker"
+        echo '```'
+        if [[ "$D_DOCKER_RUNNING" == true ]]; then
+            echo "Status: RUNNING"
+            docker ps --format "  {{.Names}}: {{.Status}} ({{.Ports}})" 2>/dev/null || true
+        else
+            echo "Status: STOPPED"
+        fi
+        echo '```'
+        echo ""
+
+        echo "## Open Ports"
+        echo '```'
+        ss -tlnp 2>/dev/null | grep LISTEN | \
+            awk '{print $4, $6}' | sed 's/^/  /' || echo "  none"
+        echo '```'
+        echo ""
+
+        echo "## Projects"
+        echo '```'
+        if [[ -d "$ZMENU_PROJECTS_DIR" ]]; then
+            while IFS= read -r -d '' p; do
+                local pn; pn=$(basename "$p")
+                local flags=""
+                [[ -f "${p}/AI.md" ]] && flags+="[AI.md]" || flags+="[no AI.md]"
+                [[ -f "${p}/.config/ai/settings.json" ]] && flags+="[secured]"
+                if [[ -d "${p}/.git" ]]; then
+                    local br; br=$(git -C "$p" branch --show-current 2>/dev/null || echo "?")
+                    flags+="[git:${br}]"
+                fi
+                echo "  ${pn}  ${flags}"
+            done < <(find "$ZMENU_PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d -print0 \
+                | sort -z 2>/dev/null || true)
+        else
+            echo "  ${ZMENU_PROJECTS_DIR} not found"
+        fi
+        echo '```'
+        echo ""
+
+        echo "## Systemd Services (AI/Infra)"
+        echo '```'
+        for s in "${D_SERVICES[@]}"; do
+            local st; st=$(systemctl is-active "$s" 2>/dev/null || echo "unknown")
+            echo "  ${s}: ${st}"
+        done
+        echo '```'
+        echo ""
+
+        echo "## Recent Errors"
+        echo '```'
+        if [[ -f "$ZMENU_ERROR_LOG" ]]; then
+            tail -10 "$ZMENU_ERROR_LOG"
+        else
+            echo "none"
+        fi
+        echo '```'
+
+    } > "$ZMENU_CONTEXT_FILE" 2>/dev/null
+}
+
+# ============================================================
+#  SECTION 4 — LOCAL AI LAUNCHER
+# ============================================================
+
+OWUI_PORT="${OWUI_PORT:-3000}"
+OWUI_URL="http://localhost:${OWUI_PORT}"
+
+owui_check() {
+    if [[ "$D_OLLAMA_RUNNING" == false ]]; then
+        echo -e "  ${FAIL}  Ollama not running"
+        echo "  Start: sudo systemctl start ollama"
+        return 1
+    fi
+    if ! curl -sf "${OWUI_URL}" >/dev/null 2>&1; then
+        echo -e "  ${WARN}  Open WebUI not running on ${OWUI_URL}"
+        echo ""
+        echo "  Start it with:"
+        echo "  docker run -d --name open-webui --restart unless-stopped \\"
+        echo "    -p 127.0.0.1:3000:8080 \\"
+        echo "    --add-host=host.docker.internal:host-gateway \\"
+        echo "    -v open-webui:/app/backend/data \\"
+        echo "    ghcr.io/open-webui/open-webui:main"
+        return 1
+    fi
+    return 0
+}
+
+_build_context_prompt() {
+    local role_prompt="${1:-}"
+    local context=""
+    context_generate
+    context="$(cat "$ZMENU_CONTEXT_FILE" 2>/dev/null)"
+    local skill_dir="${HOME}/.config/ai/skills"
+    if [[ -d "$skill_dir" ]]; then
+        for sf in "${skill_dir}"/*.md; do
+            if [[ -f "$sf" ]]; then
+                context+="\n\n---\n# Skill: $(basename "$sf" .md)\n"
+                context+="$(cat "$sf")"
+            fi
+        done
+    fi
+    if [[ -n "$role_prompt" ]]; then
+        context+="\n\n---\n${role_prompt}"
+    fi
+    printf '%s' "$context"
+}
+
+cc_launch() {
+    local title="${1:-Local AI}"
+    local prompt="${2:-}"
+    local workdir="${3:-$HOME}"
+
+    echo "  Generating live system context..."
+    context_generate
+    echo -e "  ${OK}  Context ready → ${ZMENU_CONTEXT_FILE}"
+
+    local full_context
+    full_context="$(_build_context_prompt "$prompt")"
+
+    local session_file="/tmp/zmenu-session-$(date +%s).md"
+    printf '%s' "$full_context" > "$session_file"
+    echo -e "  ${OK}  Session context → ${session_file}"
+
+    echo "  Priming model with context... (num_ctx=${ZMENU_AI_CONTEXT_LENGTH})"
+    curl -sf "${D_OLLAMA_URL}/api/chat" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"model\": \"${ZMENU_AI_MODEL}\",
+            \"messages\": [{
+                \"role\": \"system\",
+                \"content\": $(printf '%s' "$full_context" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")
+            }],
+            \"options\": { \"num_ctx\": ${ZMENU_AI_CONTEXT_LENGTH} },
+            \"stream\": false
+        }" >/dev/null 2>&1 && echo -e "  ${OK}  Model primed" || echo -e "  ${WARN}  Could not prime model (will still open UI)"
+
+    echo ""
+    echo -e "  ${BCYN}${title}${NC}"
+    echo "  Model: ${ZMENU_AI_MODEL}"
+    echo "  Context window: ${ZMENU_AI_CONTEXT_LENGTH} tokens"
+    echo "  Context includes: system snapshot + $(ls "${HOME}/.config/ai/skills/"*.md 2>/dev/null | wc -l) skill file(s)"
+    echo ""
+
+    if owui_check 2>/dev/null; then
+        if command -v xdg-open >/dev/null 2>&1; then
+            xdg-open "${OWUI_URL}" &>/dev/null &
+            echo -e "  ${OK}  Open WebUI launched → ${OWUI_URL}"
+            echo -e "  ${DIM}  Context file: ${session_file}${NC}"
+        fi
+    else
+        echo ""
+        echo -e "  ${BYEL}  Open WebUI not running. Fallback:${NC}"
+        echo -e "  ${DIM}  Run: ollama run ${ZMENU_AI_MODEL}${NC}"
+        echo -e "  ${DIM}  Context saved to: ${session_file}${NC}"
+    fi
+}
+
+# ============================================================
+#  SECTION 5 — CHROME: header, pause, confirm, export, dashboard
+# ============================================================
+
+header() {
+    clear
+    printf '\033[1;34m'
+    echo "  ┌─────────────────────────────────────────────────────────┐"
+    printf "  │  ▲  Z-MENU  v%-6s  ·  LOCAL SOVEREIGN                │\n" "$ZMENU_VERSION"
+    echo "  └─────────────────────────────────────────────────────────┘"
+    printf '\033[0m\n'
+}
+
+pause() {
+    [[ "$ZMENU_HEADLESS" -eq 1 ]] && { echo "  [headless: done]"; return; }
+    echo ""; read -rp "  $(printf '%b' "${DIM}[ENTER to return]${NC}") " _
+}
+
+confirm() {
+    local prompt="$1"
+    read -rp "  ${prompt} (y/N): " _c
+    [[ "$_c" =~ ^[Yy]$ ]]
+}
+
+# ── Export function — available from any screen ────────────
+# Captures current terminal output context into a markdown file
+export_report() {
+    local section="${1:-General}"
+    local extra_content="${2:-}"
+    {
+        echo "# Z-Menu Report"
+        echo "> Section: ${section}"
+        echo "> Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "> Version: ${ZMENU_VERSION}"
+        echo ""
+
+        echo "## System Overview"
+        echo "- CPU: ${D_CPU_MODEL} (${D_CPU_CORES} threads, governor: ${D_CPU_GOVERNOR})"
+        echo "- RAM: ${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB used (${D_MEM_FREE_MB} MB free)"
+        echo "- Swap: ${D_SWAP_USED_MB}/${D_SWAP_TOTAL_MB} MB"
+        local disk_info; disk_info=$(df -h / | awk 'NR==2{printf "%s used / %s (%s free)",$3,$2,$4}')
+        echo "- Disk: ${disk_info}"
+        echo "- Load: $(awk '{print $1,$2,$3}' /proc/loadavg)"
+        echo ""
+
+        echo "## AI Stack"
+        if [[ "$D_OLLAMA_RUNNING" == true ]]; then
+            echo "- Ollama: RUNNING at ${D_OLLAMA_URL}"
+            echo "- Active model: ${D_OLLAMA_ACTIVE_MODEL:-none}"
+            echo "- Available: ${D_OLLAMA_MODELS[*]:-none}"
+            echo "- Context window: ${ZMENU_AI_CONTEXT_LENGTH}"
+        else
+            echo "- Ollama: STOPPED"
+        fi
+        echo ""
+
+        echo "## GPU"
+        echo "- Driver: ${D_GPU_DRIVER:-none}"
+        echo "- GFX: ${D_GPU_GFX:-unknown}"
+        [[ -n "$D_GPU_TEMP" ]] && echo "- Temp: ${D_GPU_TEMP}°C"
+        [[ -n "$D_GPU_USE" ]] && echo "- Utilisation: ${D_GPU_USE}%"
+        echo ""
+
+        echo "## Docker"
+        if [[ "$D_DOCKER_RUNNING" == true ]]; then
+            echo "- Status: RUNNING (${#D_CONTAINERS[@]} containers)"
+            for c in "${D_CONTAINERS[@]}"; do echo "  - ${c}"; done
+        else
+            echo "- Status: STOPPED"
+        fi
+        echo ""
+
+        if [[ -n "$extra_content" ]]; then
+            echo "## ${section} Details"
+            echo "$extra_content"
+            echo ""
+        fi
+
+        echo "---"
+        echo "*Report generated by zmenu v${ZMENU_VERSION}*"
+    } > "$ZMENU_REPORT_FILE"
+    echo -e "  ${OK}  Report saved to ${BOLD}${ZMENU_REPORT_FILE}${NC}"
+}
+
+# ── Dashboard status display ──────────────────────────────
+# This is the home screen — shows everything at a glance
+dashboard() {
+    # ── Refresh live metrics ──
+    _disc_memory
+
+    # ── AI Engine ─────────────────────────────────────────
+    local _olla _olla_info
+    if [[ "$D_OLLAMA_RUNNING" == true ]]; then
+        _olla=$OK
+        if [[ -n "$D_OLLAMA_ACTIVE_MODEL" ]]; then
+            _olla_info="${D_OLLAMA_ACTIVE_MODEL}  ctx:${ZMENU_AI_CONTEXT_LENGTH}"
+        else
+            _olla_info="running, no model loaded"
+        fi
+    else
+        _olla=$FAIL; _olla_info="stopped"
+    fi
+
+    local _lms
+    $D_LMS_RUNNING && _lms=$OK || _lms=$IDLE
+
+    local _owui
+    if curl -sf "${OWUI_URL}" >/dev/null 2>&1; then
+        _owui=$OK
+    else
+        _owui=$IDLE
+    fi
+
+    # ── Memory Pool ───────────────────────────────────────
+    local mem_pct=0
+    [[ "$D_MEM_TOTAL_MB" -gt 0 ]] && mem_pct=$((D_MEM_USED_MB * 100 / D_MEM_TOTAL_MB))
+    local _mem
+    if [[ $mem_pct -lt 70 ]]; then _mem=$OK
+    elif [[ $mem_pct -lt 90 ]]; then _mem=$WARN
+    else _mem=$FAIL; fi
+
+    # Memory consumers (top 5 by RSS)
+    local mem_consumers
+    mem_consumers=$(ps aux --sort=-rss 2>/dev/null \
+        | awk 'NR>1 && NR<=6{printf "      %-18s %5.0f MB\n", $11, $6/1024}' || true)
+
+    # Ollama VRAM usage
+    local ollama_vram=""
+    if [[ "$D_OLLAMA_RUNNING" == true ]]; then
+        ollama_vram=$(curl -sf "${D_OLLAMA_URL}/api/ps" 2>/dev/null \
+            | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    for m in d.get('models',[]):
+        sz=m.get('size_vram',0)/(1024**3)
+        print(f'      Ollama model: {m[\"name\"]}  {sz:.1f} GB')
+except: pass
+" 2>/dev/null || true)
+    fi
+
+    # Swap
+    local _swap
+    if [[ "$D_SWAP_USED_MB" -gt 100 ]]; then _swap=$WARN
+    elif [[ "$D_SWAP_USED_MB" -gt 0 ]]; then _swap=$OK
+    else _swap=$IDLE; fi
+
+    # ── GPU ───────────────────────────────────────────────
+    local _gpu _gpu_info
+    case "$D_GPU_DRIVER" in
+        rocm)         _gpu=$OK;   _gpu_info="${D_GPU_GFX}  ${D_GPU_TEMP:-?}°C  ${D_GPU_USE:-?}%" ;;
+        nvidia)       _gpu=$OK;   _gpu_info="${D_GPU_GFX}  ${D_GPU_TEMP:-?}°C  ${D_GPU_USE:-?}%" ;;
+        amdgpu-sysfs) _gpu=$WARN; _gpu_info="sysfs only  ${D_GPU_TEMP:-?}°C  ${DIM}(rocm-smi not in PATH)${NC}" ;;
+        *)            _gpu=$IDLE; _gpu_info="not detected" ;;
+    esac
+
+    # ── NPU ───────────────────────────────────────────────
+    local _npu _npu_info
+    if [[ -n "$D_NPU_DRIVER" && "$D_NPU_DEVICE" != "no-device" ]]; then
+        _npu=$OK; _npu_info="${D_NPU_DRIVER}  ${D_NPU_DEVICE}"
+    elif [[ -n "$D_NPU_DRIVER" ]]; then
+        _npu=$WARN; _npu_info="${D_NPU_DRIVER} loaded, no device"
+    else
+        _npu=$IDLE; _npu_info="no driver"
+    fi
+
+    # ── Docker ────────────────────────────────────────────
+    local _dock _dock_info
+    if [[ "$D_DOCKER_RUNNING" == true ]]; then
+        _dock=$OK; _dock_info="${#D_CONTAINERS[@]} container(s)"
+    else
+        _dock=$FAIL; _dock_info="stopped"
+    fi
+
+    # ── Disk ──────────────────────────────────────────────
+    local disk_pct; disk_pct=$(df / | awk 'NR==2{gsub(/%/,"",$5); print $5}')
+    local _disk
+    if [[ "$disk_pct" -lt 70 ]]; then _disk=$OK
+    elif [[ "$disk_pct" -lt 85 ]]; then _disk=$WARN
+    else _disk=$FAIL; fi
+
+    # ── Thermals ──────────────────────────────────────────
+    local cpu_temp=""
+    if command -v sensors >/dev/null 2>&1; then
+        cpu_temp=$(sensors 2>/dev/null | awk '/Tctl|Tdie/{gsub(/[+°C]/,"",$2); print $2; exit}' || echo "")
+    fi
+    [[ -z "$cpu_temp" ]] && cpu_temp=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | head -1 | awk '{printf "%.0f", $1/1000}' || echo "?")
+    local _therm
+    local therm_val="${cpu_temp:-0}"
+    if [[ "$therm_val" =~ ^[0-9]+$ ]]; then
+        if [[ $therm_val -lt 70 ]]; then _therm=$OK
+        elif [[ $therm_val -lt 85 ]]; then _therm=$WARN
+        else _therm=$FAIL; fi
+    else
+        _therm=$IDLE
+    fi
+
+    # ── Load ──────────────────────────────────────────────
+    local load1; load1=$(awk '{print $1}' /proc/loadavg)
+    local _load
+    local load_int=${load1%.*}
+    local core_count=${D_CPU_CORES:-4}
+    if [[ $load_int -lt $core_count ]]; then _load=$OK
+    elif [[ $load_int -lt $((core_count * 2)) ]]; then _load=$WARN
+    else _load=$FAIL; fi
+
+    # ── RENDER ────────────────────────────────────────────
+    echo -e "  ${BOLD}${BBLU}┄ DASHBOARD ────────────────────────────────────────────${NC}"
+    echo ""
+    echo -e "  ${BOLD}AI Engine${NC}"
+    echo -e "    Ollama      ${_olla}  ${_olla_info}"
+    echo -e "    Open WebUI  ${_owui}  $(curl -sf "${OWUI_URL}" >/dev/null 2>&1 && echo "${OWUI_URL}" || echo "${DIM}not running${NC}")"
+    echo -e "    LM Studio   ${_lms}  $([ "$D_LMS_RUNNING" == true ] && echo "${D_LMS_URL}" || echo "${DIM}off${NC}")"
+    echo ""
+
+    echo -e "  ${BOLD}Memory Pool${NC}    ${_mem}  ${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB  (${mem_pct}%)"
+    [[ -n "$ollama_vram" ]] && echo -e "$ollama_vram"
+    echo -e "    ${_swap}  Swap: ${D_SWAP_USED_MB}/${D_SWAP_TOTAL_MB} MB"
+    if [[ -n "$mem_consumers" ]]; then
+        echo -e "    ${DIM}Top consumers:${NC}"
+        echo -e "$mem_consumers"
+    fi
+    echo ""
+
+    echo -e "  ${BOLD}Hardware${NC}"
+    echo -e "    GPU       ${_gpu}  ${_gpu_info}"
+    echo -e "    NPU       ${_npu}  ${DIM}${_npu_info}${NC}"
+    echo -e "    Thermals  ${_therm}  CPU: ${cpu_temp:-?}°C  GPU: ${D_GPU_TEMP:-?}°C"
+    echo -e "    Load      ${_load}  $(awk '{printf "%s %s %s",$1,$2,$3}' /proc/loadavg)  ${DIM}(${D_CPU_CORES} threads)${NC}"
+    echo ""
+
+    echo -e "  ${BOLD}Services${NC}"
+    echo -e "    Docker    ${_dock}  ${_dock_info}"
+    echo -e "    Disk      ${_disk}  ${disk_pct}% used"
+    echo ""
+
+    echo -e "  ${DIM}$(date '+%a %d %b %Y  %H:%M:%S')${NC}"
+    echo -e "  ${DIM}● green=healthy  ● red=needs attention  ● yellow=warning  ○ grey=idle${NC}"
+    echo ""
+}
+
+# ============================================================
+#  SECTION 6 — MODULES
+# ============================================================
+
+# ──────────────────────────────────────────────────────────
+#  MODULE 2: FIND PROBLEMS — Full bottleneck sweep
+# ──────────────────────────────────────────────────────────
+
+mod_find_problems() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ FIND PROBLEMS ────────────────────────────────────────${NC}"
+        echo ""
+        echo "  Scans your system for performance bottlenecks, misconfigurations,"
+        echo "  and wasted resources. Every finding explained in plain English."
+        echo ""
+        echo "   a)  Run full bottleneck sweep"
+        echo "   b)  CPU only      (governor, boost, pstate)"
+        echo "   c)  Memory only   (pressure, swap, swappiness)"
+        echo "   d)  GPU only      (Ollama GPU vs CPU check)"
+        echo "   e)  Docker only   (overhead, limits, orphans)"
+        echo "   f)  Storage only  (I/O scheduler, alignment)"
+        echo "   g)  Thermals only (throttling check)"
+        echo "   h)  Kernel tuning (vm.swappiness, fs.inotify, etc.)"
+        echo ""
+        echo "   E)  Export report"
+        echo "   C)  ✦ Ask AI to diagnose problems"
+        echo "   r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            a) _bp_full_sweep; pause ;;
+            b) _bp_cpu; pause ;;
+            c) _bp_memory; pause ;;
+            d) _bp_gpu; pause ;;
+            e) _bp_docker; pause ;;
+            f) _bp_storage; pause ;;
+            g) _bp_thermals; pause ;;
+            h) _bp_kernel; pause ;;
+            E) _bp_full_sweep 2>&1 | tee /tmp/zmenu-bp.txt >/dev/null
+               export_report "Find Problems" "$(cat /tmp/zmenu-bp.txt 2>/dev/null)"; pause ;;
+            C) cc_launch "System Diagnostician" \
+                "Run a full diagnostic on this system. Check CPU governor, memory pressure, GPU utilisation, Docker overhead, thermal throttling, and kernel tuning. For every issue found, explain in plain English what it means and give a ready-to-copy fix command."; pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+_bp_finding() {
+    # $1 = severity (ok|warn|crit), $2 = title, $3 = explanation, $4 = fix command (optional)
+    local sev="$1" title="$2" explain="$3" fix="${4:-}"
+    case "$sev" in
+        ok)   echo -e "  ${OK}  ${BOLD}${title}${NC}" ;;
+        warn) echo -e "  ${WARN}  ${BOLD}${title}${NC}" ;;
+        crit) echo -e "  ${FAIL}  ${BOLD}${title}${NC}" ;;
+    esac
+    echo -e "      ${DIM}${explain}${NC}"
+    if [[ -n "$fix" ]]; then
+        echo -e "      ${BCYN}Fix:${NC} ${fix}"
+    fi
+    echo ""
+}
+
+_bp_cpu() {
+    header
+    echo -e "${BCYN}┄ CPU BOTTLENECK CHECK${NC}"
+    echo ""
+
+    # Governor
+    local gov; gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo "unknown")
+    if [[ "$gov" == "performance" ]]; then
+        _bp_finding "ok" "CPU governor: ${gov}" "CPU is set to maximum performance."
+    elif [[ "$gov" == "powersave" ]]; then
+        _bp_finding "warn" "CPU governor: ${gov}" \
+            "CPU is in power-saving mode — this throttles clock speed and slows AI inference." \
+            "sudo cpupower frequency-set -g performance"
+    elif [[ "$gov" == "schedutil" || "$gov" == "ondemand" ]]; then
+        _bp_finding "ok" "CPU governor: ${gov}" "Dynamic governor — scales with demand. Fine for most workloads."
+    else
+        _bp_finding "warn" "CPU governor: ${gov}" "Unexpected governor. Check if this is intentional."
+    fi
+
+    # Boost
+    local boost_file="/sys/devices/system/cpu/cpufreq/boost"
+    if [[ -f "$boost_file" ]]; then
+        local boost; boost=$(cat "$boost_file" 2>/dev/null)
+        if [[ "$boost" == "1" ]]; then
+            _bp_finding "ok" "CPU boost: enabled" "Turbo boost is on — maximum single-thread performance."
+        else
+            _bp_finding "warn" "CPU boost: disabled" \
+                "Turbo boost is off — you're leaving performance on the table for AI workloads." \
+                "echo 1 | sudo tee ${boost_file}"
+        fi
+    fi
+
+    # AMD pstate driver
+    local pstate_status
+    pstate_status=$(cat /sys/devices/system/cpu/amd_pstate/status 2>/dev/null || echo "not found")
+    if [[ "$pstate_status" == "active" ]]; then
+        _bp_finding "ok" "AMD P-State: active" "Using the modern AMD P-State driver for best efficiency."
+    elif [[ "$pstate_status" == "passive" ]]; then
+        _bp_finding "warn" "AMD P-State: passive" \
+            "P-State is in passive mode — active mode gives better power/perf scaling." \
+            "echo active | sudo tee /sys/devices/system/cpu/amd_pstate/status"
+    elif [[ "$pstate_status" != "not found" ]]; then
+        _bp_finding "warn" "AMD P-State: ${pstate_status}" "Check if this is expected."
+    fi
+
+    # Load average vs cores
+    local load1; load1=$(awk '{print $1}' /proc/loadavg)
+    local load_int=${load1%.*}
+    local cores=${D_CPU_CORES:-4}
+    if [[ $load_int -gt $((cores * 2)) ]]; then
+        _bp_finding "crit" "CPU overloaded: load ${load1} on ${cores} threads" \
+            "System is heavily overloaded — processes are queuing for CPU time." \
+            "Check: ps aux --sort=-%cpu | head -10"
+    elif [[ $load_int -gt $cores ]]; then
+        _bp_finding "warn" "CPU busy: load ${load1} on ${cores} threads" \
+            "Load exceeds thread count — some queueing is happening."
+    else
+        _bp_finding "ok" "CPU load healthy: ${load1} on ${cores} threads" "Plenty of headroom."
+    fi
+}
+
+_bp_memory() {
+    header
+    echo -e "${BCYN}┄ MEMORY BOTTLENECK CHECK${NC}"
+    echo ""
+    _disc_memory
+
+    # RAM pressure
+    local mem_pct=$((D_MEM_USED_MB * 100 / D_MEM_TOTAL_MB))
+    if [[ $mem_pct -gt 90 ]]; then
+        _bp_finding "crit" "RAM pressure: ${mem_pct}% used (${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB)" \
+            "System is nearly out of RAM. This causes swapping which destroys performance." \
+            "Check who's using it: ps aux --sort=-rss | head -10"
+    elif [[ $mem_pct -gt 75 ]]; then
+        _bp_finding "warn" "RAM usage: ${mem_pct}% (${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB)" \
+            "Getting high — watch for swap activity."
+    else
+        _bp_finding "ok" "RAM healthy: ${mem_pct}% used (${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB)" \
+            "Plenty of free memory."
+    fi
+
+    # Swap
+    if [[ "$D_SWAP_USED_MB" -gt 500 ]]; then
+        _bp_finding "crit" "Swap in heavy use: ${D_SWAP_USED_MB} MB" \
+            "System is actively swapping — this makes everything slow, especially AI inference." \
+            "Free swap: sudo swapoff -a && sudo swapon -a  (warning: needs free RAM)"
+    elif [[ "$D_SWAP_USED_MB" -gt 100 ]]; then
+        _bp_finding "warn" "Swap in use: ${D_SWAP_USED_MB} MB" \
+            "Some data has been swapped to disk. Not critical but watch it."
+    else
+        _bp_finding "ok" "Swap clean: ${D_SWAP_USED_MB} MB used" "No swap pressure."
+    fi
+
+    # Swappiness
+    local swappiness; swappiness=$(cat /proc/sys/vm/swappiness 2>/dev/null || echo "?")
+    if [[ "$swappiness" =~ ^[0-9]+$ ]]; then
+        if [[ $swappiness -gt 30 ]]; then
+            _bp_finding "warn" "vm.swappiness = ${swappiness} (high)" \
+                "The kernel is too eager to swap. For AI workloads with lots of RAM, lower is better." \
+                "sudo sysctl vm.swappiness=10  (add to /etc/sysctl.conf for permanence)"
+        else
+            _bp_finding "ok" "vm.swappiness = ${swappiness}" "Good — kernel won't swap aggressively."
+        fi
+    fi
+
+    # Memory consumers
+    echo -e "  ${BCYN}Top memory consumers:${NC}"
+    ps aux --sort=-rss 2>/dev/null \
+        | awk 'NR>1 && NR<=8{printf "    %-25s %6.0f MB  (%s%%)\n", $11, $6/1024, $4}' || true
+    echo ""
+}
+
+_bp_gpu() {
+    header
+    echo -e "${BCYN}┄ GPU BOTTLENECK CHECK${NC}"
+    echo ""
+
+    if [[ "$D_GPU_DRIVER" == "none" || -z "$D_GPU_DRIVER" ]]; then
+        _bp_finding "crit" "No GPU driver detected" \
+            "AI inference will run on CPU only — this is 10x slower than GPU." \
+            "Install ROCm (AMD) or CUDA (Nvidia) drivers"
+        return
+    fi
+
+    if [[ "$D_GPU_DRIVER" == "amdgpu-sysfs" ]]; then
+        _bp_finding "warn" "GPU detected but rocm-smi not in PATH" \
+            "The GPU exists but ROCm tools aren't accessible. Ollama may fall back to CPU." \
+            "export PATH=\$PATH:/opt/rocm/bin  (add to ~/.bashrc)"
+    fi
+
+    # Check if Ollama is using GPU or CPU
+    if [[ "$D_OLLAMA_RUNNING" == true && -n "$D_OLLAMA_ACTIVE_MODEL" ]]; then
+        local ps_json
+        ps_json=$(curl -sf "${D_OLLAMA_URL}/api/ps" 2>/dev/null || echo "")
+        if [[ -n "$ps_json" ]]; then
+            local gpu_check
+            gpu_check=$(echo "$ps_json" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for m in d.get('models', []):
+        vram = m.get('size_vram', 0)
+        total = m.get('size', 0)
+        if total > 0:
+            gpu_pct = (vram / total) * 100
+            print(f'{gpu_pct:.0f}')
+        else:
+            print('0')
+except: print('unknown')
+" 2>/dev/null || echo "unknown")
+            if [[ "$gpu_check" =~ ^[0-9]+$ ]]; then
+                if [[ $gpu_check -gt 90 ]]; then
+                    _bp_finding "ok" "Ollama: ${gpu_check}% on GPU" \
+                        "Model is running on GPU — fast inference."
+                elif [[ $gpu_check -gt 0 ]]; then
+                    _bp_finding "warn" "Ollama: only ${gpu_check}% on GPU" \
+                        "Part of the model is on CPU — this slows inference. Check if you have enough VRAM." \
+                        "Try a smaller model or reduce context length"
+                else
+                    _bp_finding "crit" "Ollama is using CPU instead of GPU" \
+                        "This makes inference 10x slower. The GPU driver may not be configured correctly." \
+                        "Check: HSA_OVERRIDE_GFX_VERSION, ROCm install, or CUDA drivers"
+                fi
+            fi
+        fi
+    elif [[ "$D_OLLAMA_RUNNING" == true ]]; then
+        _bp_finding "ok" "Ollama running, no model loaded" "Load a model to check GPU allocation."
+    fi
+
+    # HSA override check (AMD)
+    if [[ "$D_GPU_DRIVER" == "rocm" ]]; then
+        local hsa="${HSA_OVERRIDE_GFX_VERSION:-NOT SET}"
+        if [[ "$hsa" == "NOT SET" ]]; then
+            local gfx_num="${D_GPU_GFX#gfx}"
+            local gfx_hint=""
+            if [[ ${#gfx_num} -eq 4 ]]; then
+                gfx_hint="${gfx_num:0:2}.${gfx_num:2:1}.${gfx_num:3:1}"
+            else
+                gfx_hint="${gfx_num}"
+            fi
+            _bp_finding "warn" "HSA_OVERRIDE_GFX_VERSION not set" \
+                "ROCm may not recognize your GPU without this variable." \
+                "export HSA_OVERRIDE_GFX_VERSION=${gfx_hint}  (add to ~/.bashrc)"
+        else
+            _bp_finding "ok" "HSA_OVERRIDE_GFX_VERSION=${hsa}" "ROCm GPU hint is set."
+        fi
+    fi
+}
+
+_bp_docker() {
+    header
+    echo -e "${BCYN}┄ DOCKER BOTTLENECK CHECK${NC}"
+    echo ""
+
+    if [[ "$D_DOCKER_RUNNING" != true ]]; then
+        _bp_finding "ok" "Docker not running" "No container overhead."
+        return
+    fi
+
+    # Container count
+    local total; total=$(docker ps -q 2>/dev/null | wc -l)
+    local all_total; all_total=$(docker ps -aq 2>/dev/null | wc -l)
+    local stopped=$((all_total - total))
+    if [[ $stopped -gt 5 ]]; then
+        _bp_finding "warn" "${stopped} stopped containers" \
+            "Stopped containers waste disk space." \
+            "docker container prune -f"
+    fi
+
+    # Dangling images
+    local dangling; dangling=$(docker images -f "dangling=true" -q 2>/dev/null | wc -l)
+    if [[ $dangling -gt 0 ]]; then
+        _bp_finding "warn" "${dangling} dangling image(s)" \
+            "Orphaned image layers wasting disk space." \
+            "docker image prune -f"
+    fi
+
+    # Container resource usage
+    echo -e "  ${BCYN}Container resource usage:${NC}"
+    docker stats --no-stream --format "    {{.Name}}: {{.CPUPerc}} CPU  {{.MemUsage}}" 2>/dev/null || echo "    Could not query"
+    echo ""
+
+    # Containers without memory limits
+    local unlimited
+    unlimited=$(docker ps --format '{{.Names}}' 2>/dev/null | while read -r name; do
+        local mem_limit; mem_limit=$(docker inspect --format '{{.HostConfig.Memory}}' "$name" 2>/dev/null || echo "0")
+        [[ "$mem_limit" == "0" ]] && echo "$name"
+    done || true)
+    if [[ -n "$unlimited" ]]; then
+        _bp_finding "warn" "Containers without memory limits" \
+            "These containers can use unlimited RAM: $(echo "$unlimited" | tr '\n' ', ')" \
+            "Add --memory=2g to docker run commands"
+    fi
+}
+
+_bp_storage() {
+    header
+    echo -e "${BCYN}┄ STORAGE BOTTLENECK CHECK${NC}"
+    echo ""
+
+    # Disk usage
+    local disk_pct; disk_pct=$(df / | awk 'NR==2{gsub(/%/,"",$5); print $5}')
+    if [[ $disk_pct -gt 90 ]]; then
+        _bp_finding "crit" "Disk ${disk_pct}% full" \
+            "Almost out of disk space — this can cause crashes and data loss." \
+            "Run: zmenu → Maintenance → Disk audit"
+    elif [[ $disk_pct -gt 75 ]]; then
+        _bp_finding "warn" "Disk ${disk_pct}% used" "Getting full. Plan cleanup soon."
+    else
+        _bp_finding "ok" "Disk ${disk_pct}% used" "Healthy disk space."
+    fi
+
+    # I/O scheduler
+    local root_dev; root_dev=$(lsblk -ndo NAME "$(findmnt -no SOURCE /)" 2>/dev/null || echo "")
+    if [[ -n "$root_dev" ]]; then
+        local sched_file="/sys/block/${root_dev}/queue/scheduler"
+        if [[ -f "$sched_file" ]]; then
+            local sched; sched=$(cat "$sched_file" 2>/dev/null)
+            local active; active=$(echo "$sched" | grep -o '\[.*\]' | tr -d '[]')
+            if [[ "$active" == "none" || "$active" == "mq-deadline" || "$active" == "kyber" ]]; then
+                _bp_finding "ok" "I/O scheduler: ${active}" "Good choice for NVMe/SSD."
+            elif [[ "$active" == "bfq" || "$active" == "cfq" ]]; then
+                _bp_finding "warn" "I/O scheduler: ${active}" \
+                    "This scheduler adds overhead on NVMe. Switch to 'none' or 'mq-deadline' for best throughput." \
+                    "echo none | sudo tee ${sched_file}"
+            fi
+        fi
+    fi
+
+    # Large space consumers
+    echo -e "  ${BCYN}Largest space consumers:${NC}"
+    local ollama_sz; ollama_sz=$(du -sh "${HOME}/.ollama/models" 2>/dev/null | cut -f1 || echo "0")
+    local lms_sz; lms_sz=$(du -sh "${HOME}/.lmstudio/models" 2>/dev/null | cut -f1 || echo "0")
+    local docker_sz; docker_sz=$(docker system df --format '{{.Size}}' 2>/dev/null | head -1 || echo "0")
+    local journal_sz; journal_sz=$(du -sh /var/log/journal 2>/dev/null | cut -f1 || echo "0")
+    printf "    %-30s  %s\n" "Ollama models:" "$ollama_sz"
+    printf "    %-30s  %s\n" "LM Studio models:" "$lms_sz"
+    printf "    %-30s  %s\n" "Docker:" "$docker_sz"
+    printf "    %-30s  %s\n" "Journal logs:" "$journal_sz"
+    echo ""
+}
+
+_bp_thermals() {
+    header
+    echo -e "${BCYN}┄ THERMAL BOTTLENECK CHECK${NC}"
+    echo ""
+
+    # CPU temp
+    local cpu_temp=""
+    if command -v sensors >/dev/null 2>&1; then
+        cpu_temp=$(sensors 2>/dev/null | awk '/Tctl|Tdie/{gsub(/[+°C]/,"",$2); print $2; exit}' || echo "")
+    fi
+    [[ -z "$cpu_temp" ]] && cpu_temp=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | head -1 | awk '{printf "%.0f", $1/1000}' || echo "?")
+
+    if [[ "$cpu_temp" =~ ^[0-9]+$ ]]; then
+        if [[ $cpu_temp -gt 95 ]]; then
+            _bp_finding "crit" "CPU temperature: ${cpu_temp}°C — THROTTLING LIKELY" \
+                "The CPU is dangerously hot and is almost certainly throttling to prevent damage." \
+                "Check: cooling, ambient temp, or switch power profile: powerprofilesctl set balanced"
+        elif [[ $cpu_temp -gt 80 ]]; then
+            _bp_finding "warn" "CPU temperature: ${cpu_temp}°C — getting hot" \
+                "High but within limits. Sustained heat may cause throttling during AI workloads."
+        else
+            _bp_finding "ok" "CPU temperature: ${cpu_temp}°C" "Cool and comfortable."
+        fi
+    fi
+
+    # GPU temp
+    if [[ -n "$D_GPU_TEMP" && "$D_GPU_TEMP" != "?" ]]; then
+        local gt="${D_GPU_TEMP%%.*}"  # strip decimals
+        if [[ "$gt" =~ ^[0-9]+$ ]]; then
+            if [[ $gt -gt 95 ]]; then
+                _bp_finding "crit" "GPU temperature: ${D_GPU_TEMP}°C — THROTTLING" \
+                    "GPU is thermal throttling — inference will be significantly slower."
+            elif [[ $gt -gt 80 ]]; then
+                _bp_finding "warn" "GPU temperature: ${D_GPU_TEMP}°C" "Getting warm under load."
+            else
+                _bp_finding "ok" "GPU temperature: ${D_GPU_TEMP}°C" "Normal."
+            fi
+        fi
+    fi
+
+    # Throttle check (kernel)
+    if [[ -f /sys/devices/system/cpu/cpu0/thermal_throttle/core_throttle_count ]]; then
+        local throttle_count; throttle_count=$(cat /sys/devices/system/cpu/cpu0/thermal_throttle/core_throttle_count 2>/dev/null || echo "0")
+        if [[ "$throttle_count" -gt 0 ]]; then
+            _bp_finding "warn" "CPU has throttled ${throttle_count} time(s) since boot" \
+                "Thermal throttling has occurred. This reduces performance during heavy loads."
+        fi
+    fi
+}
+
+_bp_kernel() {
+    header
+    echo -e "${BCYN}┄ KERNEL TUNING CHECK${NC}"
+    echo ""
+
+    # vm.swappiness
+    local swappiness; swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "?")
+    if [[ "$swappiness" =~ ^[0-9]+$ ]] && [[ $swappiness -gt 30 ]]; then
+        _bp_finding "warn" "vm.swappiness = ${swappiness}" \
+            "Too eager to swap. For systems with lots of RAM doing AI work, lower is better." \
+            "sudo sysctl vm.swappiness=10"
+    else
+        _bp_finding "ok" "vm.swappiness = ${swappiness}" "Good."
+    fi
+
+    # vm.dirty_ratio
+    local dirty; dirty=$(sysctl -n vm.dirty_ratio 2>/dev/null || echo "?")
+    if [[ "$dirty" =~ ^[0-9]+$ ]] && [[ $dirty -gt 30 ]]; then
+        _bp_finding "warn" "vm.dirty_ratio = ${dirty}" \
+            "Large dirty page ratio can cause I/O stalls." \
+            "sudo sysctl vm.dirty_ratio=10"
+    else
+        _bp_finding "ok" "vm.dirty_ratio = ${dirty}" "Fine."
+    fi
+
+    # fs.inotify.max_user_watches
+    local inotify; inotify=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || echo "?")
+    if [[ "$inotify" =~ ^[0-9]+$ ]] && [[ $inotify -lt 524288 ]]; then
+        _bp_finding "warn" "fs.inotify.max_user_watches = ${inotify} (low)" \
+            "Low inotify limit can cause 'no space left on device' errors in dev tools." \
+            "echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p"
+    else
+        _bp_finding "ok" "fs.inotify.max_user_watches = ${inotify}" "Adequate."
+    fi
+
+    # Transparent Huge Pages
+    local thp; thp=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo "?")
+    local thp_active; thp_active=$(echo "$thp" | grep -o '\[.*\]' | tr -d '[]')
+    _bp_finding "ok" "Transparent Huge Pages: ${thp_active:-unknown}" "Current THP setting."
+}
+
+_bp_full_sweep() {
+    header
+    echo -e "${BCYN}┄ FULL BOTTLENECK SWEEP ─────────────────────────────────${NC}"
+    echo ""
+    echo -e "  ${DIM}Scanning CPU, memory, GPU, Docker, storage, thermals, kernel...${NC}"
+    echo ""
+
+    # Capture all findings
+    _bp_cpu 2>&1 | grep -v "┄\|^$" | head -30
+    _bp_memory 2>&1 | grep -v "┄\|^$" | head -30
+    _bp_gpu 2>&1 | grep -v "┄\|^$" | head -30
+    _bp_docker 2>&1 | grep -v "┄\|^$" | head -30
+    _bp_storage 2>&1 | grep -v "┄\|^$" | head -30
+    _bp_thermals 2>&1 | grep -v "┄\|^$" | head -20
+    _bp_kernel 2>&1 | grep -v "┄\|^$" | head -20
+
+    echo ""
+    echo -e "  ${BCYN}Sweep complete.${NC} Press E on the menu to export this as a report."
+}
+
+# ──────────────────────────────────────────────────────────
+#  MODULE 3: AI ENGINE (Ollama, models, Open WebUI, LM Studio)
+# ──────────────────────────────────────────────────────────
+
+mod_ai_engine() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ AI ENGINE ────────────────────────────────────────────${NC}"
+        echo ""
+
+        # Status lines
+        local olla_label
+        if $D_OLLAMA_RUNNING; then
+            olla_label="${OK} ${D_OLLAMA_URL}  model: ${BCYN}${D_OLLAMA_ACTIVE_MODEL:-none}${NC}  ctx: ${ZMENU_AI_CONTEXT_LENGTH}"
+        else
+            olla_label="${FAIL} stopped"
+        fi
+        echo -e "  Ollama      ${olla_label}"
+
+        local owui_label
+        if curl -sf "${OWUI_URL}" >/dev/null 2>&1; then
+            owui_label="${OK} ${OWUI_URL}"
+        else
+            owui_label="${IDLE} not running"
+        fi
+        echo -e "  Open WebUI  ${owui_label}"
+
+        local lms_label
+        $D_LMS_RUNNING && lms_label="${OK} ${D_LMS_URL}" || lms_label="${IDLE} off"
+        echo -e "  LM Studio   ${lms_label}"
+        echo ""
+
+        echo "   1)  Ollama                (models · stop/start · settings)"
+        echo "   2)  Open WebUI            (status · restart · logs)"
+        echo "   3)  LM Studio             (optional — models · GGUF files)"
+        echo ""
+        echo "   4)  Test inference         (ping active model)"
+        echo -e "   5)  Context window         (${BCYN}currently ${ZMENU_AI_CONTEXT_LENGTH}${NC})"
+        echo "   6)  Switch model"
+        echo "   7)  AI session             (general chat with context)"
+        echo ""
+        echo "   E)  Export report"
+        echo "   C)  ✦ Ask AI to diagnose the AI stack"
+        echo "   r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            1) _ai_sub_ollama ;;
+            2) _ai_sub_owui ;;
+            3) _ai_sub_lms ;;
+            4) _ai_test_inference; pause ;;
+            5) _ai_set_context_length ;;
+            6) _ai_switch_model ;;
+            7) cc_launch "AI Stack Assistant" \
+                "You are an expert on this local AI stack. Review the context and tell me the current state of all AI services, what's working, what could be improved."; pause ;;
+            E) export_report "AI Engine"; pause ;;
+            C) cc_launch "AI Stack Diagnostics" \
+                "Diagnose the AI stack. Check: Ollama health, model capabilities, GPU utilisation, LM Studio status. List any issues and fixes."; pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ── Ollama sub-menu ────────────────────────────────────────
+_ai_sub_ollama() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ OLLAMA ───────────────────────────────────────────────${NC}"
+        echo ""
+
+        if [[ "$D_OLLAMA_RUNNING" == true ]]; then
+            echo -e "  Status:  ${OK} running at ${D_OLLAMA_URL}   v${D_AI_VER:-?}"
+            if [[ -n "$D_OLLAMA_ACTIVE_MODEL" ]]; then
+                local vram_info=""
+                local ps_json
+                ps_json=$(curl -sf "${D_OLLAMA_URL}/api/ps" 2>/dev/null || true)
+                if [[ -n "$ps_json" ]]; then
+                    vram_info=$(echo "$ps_json" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for m in d.get('models', []):
+        sz = m.get('size_vram', 0) / (1024**3)
+        print(f'({sz:.1f} GB VRAM)')
+except: pass
+" 2>/dev/null || true)
+                fi
+                echo -e "  Active:  ${BCYN}${D_OLLAMA_ACTIVE_MODEL}${NC}  ${vram_info}"
+            else
+                echo -e "  Active:  ${IDLE} no model loaded"
+            fi
+            echo "  Context: ${ZMENU_AI_CONTEXT_LENGTH} tokens"
+
+            # ── Live env snapshot (key vars only) ─────────────
+            local _fa _kv _ka _mp _np _hsa
+            _fa=$(sudo systemctl show ollama --property=Environment 2>/dev/null \
+                | grep -o 'OLLAMA_FLASH_ATTENTION=[^ ]*' | cut -d= -f2 || echo "?")
+            _kv=$(sudo systemctl show ollama --property=Environment 2>/dev/null \
+                | grep -o 'OLLAMA_KV_CACHE_TYPE=[^ ]*' | cut -d= -f2 || echo "?")
+            _ka=$(sudo systemctl show ollama --property=Environment 2>/dev/null \
+                | grep -o 'OLLAMA_KEEP_ALIVE=[^ ]*' | cut -d= -f2 || echo "?")
+            _mp=$(sudo systemctl show ollama --property=Environment 2>/dev/null \
+                | grep -o 'OLLAMA_MAX_LOADED_MODELS=[^ ]*' | cut -d= -f2 || echo "?")
+            _np=$(sudo systemctl show ollama --property=Environment 2>/dev/null \
+                | grep -o 'OLLAMA_NUM_PARALLEL=[^ ]*' | cut -d= -f2 || echo "?")
+            _hsa=$(sudo systemctl show ollama --property=Environment 2>/dev/null \
+                | grep -o 'HSA_OVERRIDE_GFX_VERSION=[^ ]*' | cut -d= -f2 || echo "?")
+            echo ""
+            echo -e "  ${DIM}Flash Attn: ${_fa:-–}  KV Cache: ${_kv:-–}  Keep Alive: ${_ka:-–}  Max Models: ${_mp:-–}  Parallel: ${_np:-–}  HSA: ${_hsa:-–}${NC}"
+        else
+            echo -e "  Status:  ${FAIL} stopped"
+        fi
+        echo ""
+
+        if [[ ${#D_OLLAMA_MODELS[@]} -gt 0 ]]; then
+            echo -e "  ${DIM}NAME                            SIZE        TOOLS${NC}"
+            echo -e "  ${DIM}──────────────────────────────────────────────────${NC}"
+            for m in "${D_OLLAMA_MODELS[@]}"; do
+                local sz; sz=$(ollama list 2>/dev/null | awk -v n="$m" '$1==n{print $3,$4}')
+                local tools="no"
+                for tm in "${D_OLLAMA_TOOL_MODELS[@]}"; do [[ "$tm" == "$m" ]] && tools="${BGRN}yes${NC}"; done
+                local marker=""
+                [[ "$m" == "$ZMENU_AI_MODEL" ]] && marker=" ${DIM}← active${NC}"
+                printf "  %-30s  %-10s  %b%b\n" "$m" "$sz" "$tools" "$marker"
+            done
+            echo ""
+        fi
+
+        echo "   1)  Switch model"
+        echo "   2)  Context window"
+        echo -e "   3)  ${BRED}Stop Ollama${NC}"
+        echo "   4)  Start Ollama"
+        echo "   5)  Unload model            (free VRAM, keep running)"
+        echo "   6)  Settings                (systemd override)"
+        echo ""
+        echo "   E)  Export    C)  ✦ Ask AI    r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            1) _ai_switch_model ;;
+            2) _ai_set_context_length ;;
+            3) _ai_stop_ollama; pause ;;
+            4) _ai_start_ollama; pause ;;
+            5) _ai_unload_model; pause ;;
+            6) _ai_ollama_settings ;;
+            E) export_report "Ollama"; pause ;;
+            C) cc_launch "Ollama Expert" \
+                "You are an Ollama expert. Advise on model selection, GPU memory, context length, and performance tuning."; pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ── Helper: read a single env var from the active systemd unit ──
+_ollama_get_env() {
+    # Usage: _ollama_get_env VARNAME
+    sudo systemctl show ollama --property=Environment 2>/dev/null \
+        | grep -o "${1}=[^ ]*" | cut -d= -f2 || echo "–"
+}
+
+# ── Helper: read a single env var from override.conf (set value) ──
+_ollama_get_override() {
+    local key="$1"
+    local override_dir="/etc/systemd/system/ollama.service.d"
+    grep -rh "Environment=\"${key}=" "${override_dir}"/*.conf 2>/dev/null \
+        | sed "s/.*${key}=\([^\"]*\)\".*/\1/" | head -1 || echo "–"
+}
+
+_ai_ollama_settings() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ OLLAMA SETTINGS ──────────────────────────────────────${NC}"
+        echo ""
+        local override_dir="/etc/systemd/system/ollama.service.d"
+        echo -e "  ${DIM}Source: ${override_dir}/override.conf${NC}"
+        echo ""
+
+        # Read all relevant vars from override file
+        local v_host v_flash v_kv v_ka v_maxm v_npar v_mq v_hsa v_rocr v_dnt v_noprune v_debug v_origins
+        v_host=$(_ollama_get_override "OLLAMA_HOST")
+        v_flash=$(_ollama_get_override "OLLAMA_FLASH_ATTENTION")
+        v_kv=$(_ollama_get_override "OLLAMA_KV_CACHE_TYPE")
+        v_ka=$(_ollama_get_override "OLLAMA_KEEP_ALIVE")
+        v_maxm=$(_ollama_get_override "OLLAMA_MAX_LOADED_MODELS")
+        v_npar=$(_ollama_get_override "OLLAMA_NUM_PARALLEL")
+        v_mq=$(_ollama_get_override "OLLAMA_MAX_QUEUE")
+        v_hsa=$(_ollama_get_override "HSA_OVERRIDE_GFX_VERSION")
+        v_rocr=$(_ollama_get_override "ROCR_VISIBLE_DEVICES")
+        v_dnt=$(_ollama_get_override "DO_NOT_TRACK")
+        v_noprune=$(_ollama_get_override "OLLAMA_NOPRUNE")
+        v_debug=$(_ollama_get_override "OLLAMA_DEBUG")
+        v_origins=$(_ollama_get_override "OLLAMA_ORIGINS")
+
+        # Display — two columns: variable | current value | description
+        echo -e "  ${BOLD}── Network ──────────────────────────────────────────${NC}"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_HOST" "${v_host}" "Bind address (0.0.0.0 = all interfaces)"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_ORIGINS" "${v_origins}" "Allowed CORS origins (* = any)"
+        echo ""
+        echo -e "  ${BOLD}── Performance ──────────────────────────────────────${NC}"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_FLASH_ATTENTION" "${v_flash}" "Cuts KV cache VRAM ~40% — recommend ON (1)"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_KV_CACHE_TYPE" "${v_kv}" "KV cache quant: f16 | q8_0 | q4_0 — q8_0 saves RAM"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_NUM_PARALLEL" "${v_npar}" "Concurrent requests (1 = no contention)"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_MAX_QUEUE" "${v_mq}" "Request queue depth before rejecting"
+        echo ""
+        echo -e "  ${BOLD}── Memory ───────────────────────────────────────────${NC}"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_KEEP_ALIVE" "${v_ka}" "Hold model in RAM after last req (0/-1/5m/24h)"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_MAX_LOADED_MODELS" "${v_maxm}" "Max models in RAM simultaneously"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_NOPRUNE" "${v_noprune}" "Prevent auto-deletion of model files (1=on)"
+        echo ""
+        echo -e "  ${BOLD}── GPU / ROCm (ZBook gfx1151) ───────────────────────${NC}"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "HSA_OVERRIDE_GFX_VERSION" "${v_hsa}" "CRITICAL: must be 11.5.1 for gfx1151"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "ROCR_VISIBLE_DEVICES" "${v_rocr}" "Pin to GPU 0 (unified memory)"
+        echo ""
+        echo -e "  ${BOLD}── Privacy / Debug ──────────────────────────────────${NC}"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "DO_NOT_TRACK" "${v_dnt}" "Telemetry opt-out"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "OLLAMA_DEBUG" "${v_debug}" "Verbose logging (1=on, use for troubleshooting)"
+        echo ""
+        echo -e "  ${BOLD}── zmenu (per-request, not systemd) ─────────────────${NC}"
+        printf "  %-35s ${BCYN}%-12s${NC}  ${DIM}%s${NC}\n" "num_ctx" "${ZMENU_AI_CONTEXT_LENGTH}" "Context window sent with each API request"
+        echo ""
+
+        echo "   1)  Flash Attention          (ON/OFF)"
+        echo "   2)  KV Cache Type            (f16 / q8_0 / q4_0)"
+        echo "   3)  Keep Alive               (unload timer)"
+        echo "   4)  Max Loaded Models"
+        echo "   5)  Num Parallel             (concurrent requests)"
+        echo "   6)  Max Queue"
+        echo "   7)  HSA GFX Version          (ROCm GPU hint)"
+        echo "   8)  ROCR Visible Devices"
+        echo "   9)  Ollama Host              (bind address)"
+        echo "   0)  OLLAMA_ORIGINS           (CORS)"
+        echo "   a)  DO_NOT_TRACK / NOPRUNE   (privacy)"
+        echo "   b)  OLLAMA_DEBUG             (verbose logging)"
+        echo "   c)  Apply full recommended profile for ZBook"
+        echo "   d)  Raw edit override.conf"
+        echo "   R)  Reload Ollama            (apply changes)"
+        echo ""
+        echo "   r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            1) _ai_set_flash_attn; pause ;;
+            2) _ai_set_kv_cache; pause ;;
+            3) _ai_set_keep_alive; pause ;;
+            4) _ai_set_max_models; pause ;;
+            5) _ai_set_num_parallel; pause ;;
+            6) _ai_set_max_queue; pause ;;
+            7) _ai_set_hsa_gfx; pause ;;
+            8) _ai_set_rocr_devices; pause ;;
+            9) _ai_set_ollama_host; pause ;;
+            0) _ai_set_ollama_origins; pause ;;
+            a) _ai_set_privacy; pause ;;
+            b) _ai_set_debug; pause ;;
+            c) _ai_apply_zbook_profile; pause ;;
+            d) _ai_edit_ollama_override; pause ;;
+            R) _ai_reload_ollama; pause ;;
+            r) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+_ai_edit_ollama_override() {
+    local override_dir="/etc/systemd/system/ollama.service.d"
+    local override_file="${override_dir}/override.conf"
+    if [[ ! -d "$override_dir" ]]; then
+        echo "  Creating override directory..."
+        sudo mkdir -p "$override_dir" 2>/dev/null || { echo -e "  ${FAIL}  Failed (need sudo)"; return; }
+    fi
+    if [[ ! -f "$override_file" ]]; then
+        echo "  Creating default override file..."
+        sudo tee "$override_file" >/dev/null 2>&1 << 'OLLAMAEOF'
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0"
+Environment="OLLAMA_FLASH_ATTENTION=1"
+Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
+Environment="OLLAMA_MAX_LOADED_MODELS=1"
+Environment="OLLAMA_NUM_PARALLEL=1"
+Environment="OLLAMA_KEEP_ALIVE=10m"
+Environment="OLLAMA_MAX_QUEUE=8"
+Environment="HSA_OVERRIDE_GFX_VERSION=11.5.1"
+Environment="ROCR_VISIBLE_DEVICES=0"
+Environment="DO_NOT_TRACK=1"
+Environment="OLLAMA_NOPRUNE=1"
+OLLAMAEOF
+    fi
+    sudo ${ZMENU_PREFERRED_EDITOR} "$override_file"
+    echo -e "  ${DIM}  Remember to press R (Reload Ollama) to apply changes${NC}"
+}
+
+_ai_ollama_env_set() {
+    local key="$1" val="$2"
+    local override_dir="/etc/systemd/system/ollama.service.d"
+    local override_file="${override_dir}/override.conf"
+    if [[ ! -d "$override_dir" ]]; then
+        sudo mkdir -p "$override_dir" 2>/dev/null || { echo -e "  ${FAIL}  Failed"; return 1; }
+    fi
+    if [[ ! -f "$override_file" ]]; then
+        sudo bash -c "echo '[Service]' > '${override_file}'" 2>/dev/null
+    fi
+    if sudo grep -q "Environment=\"${key}=" "$override_file" 2>/dev/null; then
+        sudo sed -i "s|Environment=\"${key}=.*\"|Environment=\"${key}=${val}\"|" "$override_file" 2>/dev/null
+    else
+        sudo bash -c "echo 'Environment=\"${key}=${val}\"' >> '${override_file}'" 2>/dev/null
+    fi
+    echo -e "  ${OK}  Set ${key}=${val}"
+}
+
+_ai_set_flash_attn() {
+    header
+    echo -e "${BCYN}┄ FLASH ATTENTION${NC}"
+    echo ""
+    echo "  Reduces KV cache VRAM usage by ~40% and speeds up inference."
+    echo "  On your ZBook unified memory pool, this is always recommended ON."
+    echo ""
+    echo "   1)  ON   (recommended)"
+    echo "   2)  OFF"
+    echo ""
+    read -rp "  Select (1-2): " n
+    case $n in
+        1) _ai_ollama_env_set "OLLAMA_FLASH_ATTENTION" "1" ;;
+        2) _ai_ollama_env_set "OLLAMA_FLASH_ATTENTION" "0" ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;;
+    esac
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_set_kv_cache() {
+    header
+    echo -e "${BCYN}┄ KV CACHE TYPE${NC}"
+    echo ""
+    echo "  Controls quantization of the KV attention cache."
+    echo "  Lower precision = less RAM per token = longer effective context."
+    echo ""
+    echo "   1)  f16    — full precision, most accurate, highest VRAM"
+    echo "   2)  q8_0   — 8-bit quant, minimal quality loss (recommended)"
+    echo "   3)  q4_0   — 4-bit quant, half the VRAM of f16, slight quality drop"
+    echo ""
+    read -rp "  Select (1-3): " n
+    local val=""
+    case $n in
+        1) val="f16" ;; 2) val="q8_0" ;; 3) val="q4_0" ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;;
+    esac
+    _ai_ollama_env_set "OLLAMA_KV_CACHE_TYPE" "$val"
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_set_keep_alive() {
+    header
+    echo -e "${BCYN}┄ KEEP ALIVE${NC}"
+    echo ""
+    echo "  How long to hold a model in RAM after the last request."
+    echo "  Longer = faster next response, more RAM held. Shorter = RAM freed sooner."
+    echo ""
+    echo "   1)  0       — unload immediately after each request"
+    echo "   2)  5m      — 5 minutes"
+    echo "   3)  10m     — 10 minutes (recommended)"
+    echo "   4)  30m     — 30 minutes"
+    echo "   5)  24h     — keep loaded all day"
+    echo "   6)  -1      — never unload (until manual or restart)"
+    echo "   7)  custom  — enter your own value"
+    echo ""
+    read -rp "  Select (1-7): " n
+    local val=""
+    case $n in
+        1) val="0" ;; 2) val="5m" ;; 3) val="10m" ;;
+        4) val="30m" ;; 5) val="24h" ;; 6) val="-1" ;;
+        7) read -rp "  Enter value (e.g. 2h, 45m, 3600): " val ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;;
+    esac
+    _ai_ollama_env_set "OLLAMA_KEEP_ALIVE" "$val"
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_set_max_models() {
+    header
+    echo -e "${BCYN}┄ MAX LOADED MODELS${NC}"
+    echo ""
+    echo "  Maximum number of models held in RAM simultaneously."
+    echo "  On unified memory, loading multiple large models will fragment your pool."
+    echo ""
+    echo "   1)  1  — recommended (prevents contention, best for 23–36 GB models)"
+    echo "   2)  2  — only with small models (< 8 GB each)"
+    echo "   3)  3  — risky, only for embed + tiny models"
+    echo ""
+    read -rp "  Select (1-3): " n
+    local val=""
+    case $n in 1) val="1" ;; 2) val="2" ;; 3) val="3" ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;; esac
+    _ai_ollama_env_set "OLLAMA_MAX_LOADED_MODELS" "$val"
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_set_num_parallel() {
+    header
+    echo -e "${BCYN}┄ NUM PARALLEL${NC}"
+    echo ""
+    echo "  How many requests Ollama processes simultaneously per model."
+    echo "  Higher = more throughput but more RAM per slot."
+    echo "  For a single-user local setup, 1 is ideal."
+    echo ""
+    echo "   1)  1  — recommended for local single-user (no contention)"
+    echo "   2)  2  — useful if running Open WebUI + CLI simultaneously"
+    echo "   3)  4  — only if running a shared/team instance"
+    echo ""
+    read -rp "  Select (1-3): " n
+    local val=""
+    case $n in 1) val="1" ;; 2) val="2" ;; 3) val="4" ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;; esac
+    _ai_ollama_env_set "OLLAMA_NUM_PARALLEL" "$val"
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_set_max_queue() {
+    header
+    echo -e "${BCYN}┄ MAX QUEUE${NC}"
+    echo ""
+    echo "  Max number of requests queued before Ollama starts rejecting."
+    echo "  For local use, 8 is more than enough."
+    echo ""
+    echo "   1)  4   — tight queue, faster rejection on overload"
+    echo "   2)  8   — recommended"
+    echo "   3)  16  — larger queue for multi-user / n8n pipelines"
+    echo "   4)  custom"
+    echo ""
+    read -rp "  Select (1-4): " n
+    local val=""
+    case $n in
+        1) val="4" ;; 2) val="8" ;; 3) val="16" ;;
+        4) read -rp "  Enter value: " val ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;;
+    esac
+    _ai_ollama_env_set "OLLAMA_MAX_QUEUE" "$val"
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_set_hsa_gfx() {
+    header
+    echo -e "${BCYN}┄ HSA_OVERRIDE_GFX_VERSION${NC}"
+    echo ""
+    echo "  Tells ROCm which GPU architecture to target."
+    echo "  Your GPU (gfx1151) is not in ROCm's official support table."
+    echo "  This override tells ROCm to treat it as 11.5.1 — required for GPU inference."
+    echo "  Without this, Ollama falls back to CPU (10× slower)."
+    echo ""
+    echo "   1)  11.5.1  — correct for gfx1151 / Radeon 8060S (ZBook)"
+    echo "   2)  custom  — enter manually"
+    echo ""
+    read -rp "  Select (1-2): " n
+    local val=""
+    case $n in
+        1) val="11.5.1" ;;
+        2) read -rp "  Enter GFX version (e.g. 11.0.0): " val ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;;
+    esac
+    _ai_ollama_env_set "HSA_OVERRIDE_GFX_VERSION" "$val"
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_set_rocr_devices() {
+    header
+    echo -e "${BCYN}┄ ROCR_VISIBLE_DEVICES${NC}"
+    echo ""
+    echo "  Pins Ollama to a specific GPU index."
+    echo "  Your ZBook has one GPU (index 0). Setting this prevents accidental CPU fallback."
+    echo ""
+    echo "   1)  0   — GPU 0 (correct for ZBook)"
+    echo "   2)  unset — let ROCm auto-select"
+    echo ""
+    read -rp "  Select (1-2): " n
+    case $n in
+        1) _ai_ollama_env_set "ROCR_VISIBLE_DEVICES" "0" ;;
+        2)
+            local override_file="/etc/systemd/system/ollama.service.d/override.conf"
+            sudo sed -i '/Environment="ROCR_VISIBLE_DEVICES=/d' "$override_file" 2>/dev/null \
+                && echo -e "  ${OK}  Removed ROCR_VISIBLE_DEVICES" \
+                || echo -e "  ${FAIL}  Could not edit file" ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;;
+    esac
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_set_ollama_host() {
+    header
+    echo -e "${BCYN}┄ OLLAMA HOST${NC}"
+    echo ""
+    echo "  Which address Ollama binds to."
+    echo ""
+    echo "   1)  0.0.0.0      — all interfaces (LAN accessible)"
+    echo "   2)  127.0.0.1    — localhost only (most secure)"
+    echo "   3)  custom       — enter manually"
+    echo ""
+    read -rp "  Select (1-3): " n
+    local val=""
+    case $n in
+        1) val="0.0.0.0" ;; 2) val="127.0.0.1" ;;
+        3) read -rp "  Enter address (e.g. 192.168.1.100): " val ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;;
+    esac
+    _ai_ollama_env_set "OLLAMA_HOST" "$val"
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_set_ollama_origins() {
+    header
+    echo -e "${BCYN}┄ OLLAMA ORIGINS (CORS)${NC}"
+    echo ""
+    echo "  Controls which browser origins can call the Ollama API."
+    echo "  Open WebUI requires this to be set to * or its specific URL."
+    echo ""
+    echo "   1)  *                    — allow all (recommended for local Open WebUI)"
+    echo "   2)  http://localhost:3000 — Open WebUI only"
+    echo "   3)  custom               — enter manually"
+    echo ""
+    read -rp "  Select (1-3): " n
+    local val=""
+    case $n in
+        1) val="*" ;; 2) val="http://localhost:3000" ;;
+        3) read -rp "  Enter origin: " val ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;;
+    esac
+    _ai_ollama_env_set "OLLAMA_ORIGINS" "$val"
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_set_privacy() {
+    header
+    echo -e "${BCYN}┄ PRIVACY SETTINGS${NC}"
+    echo ""
+    echo "  DO_NOT_TRACK=1    — opt out of Ollama telemetry"
+    echo "  OLLAMA_NOPRUNE=1  — prevent Ollama auto-deleting model files"
+    echo ""
+    echo "   1)  Enable both  (recommended)"
+    echo "   2)  Disable both"
+    echo "   3)  DO_NOT_TRACK only"
+    echo "   4)  OLLAMA_NOPRUNE only"
+    echo ""
+    read -rp "  Select (1-4): " n
+    case $n in
+        1) _ai_ollama_env_set "DO_NOT_TRACK" "1"
+           _ai_ollama_env_set "OLLAMA_NOPRUNE" "1" ;;
+        2) _ai_ollama_env_set "DO_NOT_TRACK" "0"
+           _ai_ollama_env_set "OLLAMA_NOPRUNE" "0" ;;
+        3) _ai_ollama_env_set "DO_NOT_TRACK" "1" ;;
+        4) _ai_ollama_env_set "OLLAMA_NOPRUNE" "1" ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;;
+    esac
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_set_debug() {
+    header
+    echo -e "${BCYN}┄ OLLAMA DEBUG${NC}"
+    echo ""
+    echo "  Enables verbose logging to journald."
+    echo "  Use when troubleshooting GPU fallback, model load failures, or slow inference."
+    echo "  Turn off during normal use — it writes a lot."
+    echo ""
+    echo "   1)  OFF  — normal operation (recommended)"
+    echo "   2)  ON   — verbose logging"
+    echo ""
+    read -rp "  Select (1-2): " n
+    case $n in
+        1) _ai_ollama_env_set "OLLAMA_DEBUG" "0" ;;
+        2) _ai_ollama_env_set "OLLAMA_DEBUG" "1" ;;
+        *) echo -e "${RED}  Invalid.${NC}"; return ;;
+    esac
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama${NC}"
+}
+
+_ai_apply_zbook_profile() {
+    header
+    echo -e "${BCYN}┄ APPLY ZBOOK RECOMMENDED PROFILE${NC}"
+    echo ""
+    echo "  This will write the full recommended configuration for:"
+    echo "  HP ZBook Ultra 14 G1a / gfx1151 / 128 GB unified memory"
+    echo ""
+    echo -e "  ${BYEL}Settings to be applied:${NC}"
+    echo "    OLLAMA_HOST              = 0.0.0.0"
+    echo "    OLLAMA_FLASH_ATTENTION   = 1"
+    echo "    OLLAMA_KV_CACHE_TYPE     = q8_0"
+    echo "    OLLAMA_MAX_LOADED_MODELS = 1"
+    echo "    OLLAMA_NUM_PARALLEL      = 1"
+    echo "    OLLAMA_KEEP_ALIVE        = 10m"
+    echo "    OLLAMA_MAX_QUEUE         = 8"
+    echo "    HSA_OVERRIDE_GFX_VERSION = 11.5.1"
+    echo "    ROCR_VISIBLE_DEVICES     = 0"
+    echo "    DO_NOT_TRACK             = 1"
+    echo "    OLLAMA_NOPRUNE           = 1"
+    echo "    OLLAMA_DEBUG             = 0"
+    echo ""
+    if ! confirm "Apply this profile?"; then return; fi
+    _ai_ollama_env_set "OLLAMA_HOST"              "0.0.0.0"
+    _ai_ollama_env_set "OLLAMA_FLASH_ATTENTION"   "1"
+    _ai_ollama_env_set "OLLAMA_KV_CACHE_TYPE"     "q8_0"
+    _ai_ollama_env_set "OLLAMA_MAX_LOADED_MODELS" "1"
+    _ai_ollama_env_set "OLLAMA_NUM_PARALLEL"      "1"
+    _ai_ollama_env_set "OLLAMA_KEEP_ALIVE"        "10m"
+    _ai_ollama_env_set "OLLAMA_MAX_QUEUE"         "8"
+    _ai_ollama_env_set "HSA_OVERRIDE_GFX_VERSION" "11.5.1"
+    _ai_ollama_env_set "ROCR_VISIBLE_DEVICES"     "0"
+    _ai_ollama_env_set "DO_NOT_TRACK"             "1"
+    _ai_ollama_env_set "OLLAMA_NOPRUNE"           "1"
+    _ai_ollama_env_set "OLLAMA_DEBUG"             "0"
+    echo ""
+    echo -e "  ${OK}  ZBook profile applied."
+    echo -e "  ${DIM}  Press R on settings menu to reload Ollama and activate${NC}"
+}
+
+_ai_reload_ollama() {
+    echo "  Reloading Ollama (daemon-reload + restart)..."
+    if sudo -n systemctl daemon-reload 2>/dev/null && sudo -n systemctl restart ollama 2>/dev/null; then
+        echo -e "  ${OK}  Ollama reloaded"
+    else
+        echo -e "  ${DIM}  (prompting for password)${NC}"
+        sudo systemctl daemon-reload 2>/dev/null \
+            && sudo systemctl restart ollama 2>/dev/null \
+            && echo -e "  ${OK}  Ollama reloaded" \
+            || echo -e "  ${FAIL}  Failed to reload"
+    fi
+    sleep 2
+    _disc_ollama
+    _sel_ai_model
+    echo -e "  ${OK}  Active model: ${ZMENU_AI_MODEL:-none}"
+}
+
+_ai_stop_ollama() {
+    header
+    echo -e "${BCYN}┄ STOP OLLAMA${NC}"
+    echo ""
+    if [[ "$D_OLLAMA_RUNNING" == false ]]; then
+        echo -e "  ${IDLE}  Ollama is not running"; return
+    fi
+    local ps_info
+    ps_info=$(curl -sf "${D_OLLAMA_URL}/api/ps" 2>/dev/null || true)
+    if [[ -n "$ps_info" ]]; then
+        echo "$ps_info" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for m in d.get('models', []):
+        name = m.get('name','?')
+        sz = m.get('size_vram', 0) / (1024**3)
+        print(f'  Loaded: {name}  ({sz:.1f} GB VRAM)')
+except: pass
+" 2>/dev/null || true
+        echo ""
+    fi
+    echo -e "  Stopping Ollama..."
+    if sudo -n systemctl stop ollama 2>/dev/null; then
+        echo -e "  ${OK}  Ollama stopped"
+    else
+        echo -e "  ${DIM}  (prompting for password)${NC}"
+        sudo systemctl stop ollama 2>/dev/null \
+            && echo -e "  ${OK}  Ollama stopped" \
+            || echo -e "  ${FAIL}  Could not stop Ollama"
+    fi
+    D_OLLAMA_RUNNING=false
+    D_OLLAMA_ACTIVE_MODEL=""
+}
+
+_ai_start_ollama() {
+    header
+    echo -e "${BCYN}┄ START OLLAMA${NC}"
+    echo ""
+    if [[ "$D_OLLAMA_RUNNING" == true ]]; then
+        echo -e "  ${OK}  Ollama is already running at ${D_OLLAMA_URL}"; return
+    fi
+    echo "  Starting Ollama..."
+    if sudo -n systemctl start ollama 2>/dev/null; then
+        echo -e "  ${OK}  Ollama started"
+    else
+        echo -e "  ${DIM}  (prompting for password)${NC}"
+        sudo systemctl start ollama 2>/dev/null \
+            && echo -e "  ${OK}  Ollama started" \
+            || echo -e "  ${FAIL}  Could not start Ollama"
+    fi
+    sleep 2
+    _disc_ollama
+    _sel_ai_model
+    echo -e "  ${OK}  Model: ${ZMENU_AI_MODEL}"
+}
+
+_ai_unload_model() {
+    header
+    echo -e "${BCYN}┄ UNLOAD MODEL (free VRAM)${NC}"
+    echo ""
+    if [[ "$D_OLLAMA_RUNNING" == false ]]; then
+        echo -e "  ${IDLE}  Ollama is not running"; return
+    fi
+    local ps_info
+    ps_info=$(curl -sf "${D_OLLAMA_URL}/api/ps" 2>/dev/null || true)
+    if [[ -n "$ps_info" ]]; then
+        echo "$ps_info" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    models = d.get('models', [])
+    if not models: print('  No models currently loaded')
+    else:
+        for m in models:
+            sz = m.get('size_vram', 0) / (1024**3)
+            print(f'  Loaded: {m[\"name\"]}  ({sz:.1f} GB VRAM)')
+except: print('  Could not query Ollama')
+" 2>/dev/null || true
+    fi
+    echo ""
+    echo "  Sending unload request..."
+    local models_to_unload
+    models_to_unload=$(curl -sf "${D_OLLAMA_URL}/api/ps" 2>/dev/null \
+        | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    for m in d.get('models', []): print(m.get('name',''))
+except: pass
+" 2>/dev/null || true)
+    if [[ -z "$models_to_unload" ]]; then
+        echo -e "  ${IDLE}  No models loaded"; return
+    fi
+    while IFS= read -r model_name; do
+        [[ -z "$model_name" ]] && continue
+        curl -sf "${D_OLLAMA_URL}/api/generate" \
+            -H "Content-Type: application/json" \
+            -d "{\"model\": \"${model_name}\", \"keep_alive\": 0}" \
+            >/dev/null 2>&1 \
+            && echo -e "  ${OK}  Unloaded: ${model_name}" \
+            || echo -e "  ${WARN}  Could not unload: ${model_name}"
+    done <<< "$models_to_unload"
+    D_OLLAMA_ACTIVE_MODEL=""
+    echo -e "  ${DIM}  VRAM freed within a few seconds${NC}"
+}
+
+_ai_test_inference() {
+    header
+    echo -e "${BCYN}┄ INFERENCE TEST${NC}"
+    if [[ -z "$ZMENU_AI_MODEL" || "$ZMENU_AI_MODEL" == "no-models-found" ]]; then
+        echo -e "  ${FAIL}  No model available"; return
+    fi
+    echo "  Sending test prompt to: ${ZMENU_AI_MODEL}"
+    echo ""
+    local response
+    local hsa_ver=""
+    [[ -n "$D_GPU_GFX" ]] && hsa_ver="${D_GPU_GFX#gfx}"
+    response=$(HSA_OVERRIDE_GFX_VERSION="${hsa_ver:-${HSA_OVERRIDE_GFX_VERSION:-}}" \
+        ollama run "$ZMENU_AI_MODEL" "Reply with exactly one word: ONLINE" 2>&1)
+    if echo "$response" | grep -qi "online"; then
+        echo -e "  ${OK}  Model responded: ${response}"
+        echo -e "  ${OK}  GPU inference confirmed"
+    else
+        echo -e "  ${WARN}  Response: ${response}"
+    fi
+}
+
+_ai_switch_model() {
+    header
+    echo -e "${BCYN}┄ SWITCH ACTIVE MODEL${NC}"
+    echo ""
+    if [[ ${#D_OLLAMA_MODELS[@]} -eq 0 ]]; then
+        echo -e "  ${FAIL}  No models available"; pause; return
+    fi
+    local i=1
+    for m in "${D_OLLAMA_MODELS[@]}"; do
+        local tools=""
+        for tm in "${D_OLLAMA_TOOL_MODELS[@]}"; do
+            [[ "$tm" == "$m" ]] && tools=" ${BGRN}[tools]${NC}"
+        done
+        [[ "$m" == "$ZMENU_AI_MODEL" ]] \
+            && echo -e "   ${i})  ${BOLD}${m}${NC}${tools} ${DIM}← current${NC}" \
+            || echo -e "   ${i})  ${m}${tools}"
+        ((i++))
+    done
+    echo ""
+    read -rp "  Select number: " n
+    if [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -ge 1 ]] && [[ "$n" -le ${#D_OLLAMA_MODELS[@]} ]]; then
+        ZMENU_AI_MODEL="${D_OLLAMA_MODELS[$((n-1))]}"
+        if grep -q "ZMENU_AI_MODEL" "$ZMENU_CONFIG_FILE"; then
+            sed -i "s|^ZMENU_AI_MODEL=.*|ZMENU_AI_MODEL=\"${ZMENU_AI_MODEL}\"|" "$ZMENU_CONFIG_FILE"
+        else
+            echo "ZMENU_AI_MODEL=\"${ZMENU_AI_MODEL}\"" >> "$ZMENU_CONFIG_FILE"
+        fi
+        echo -e "  ${OK}  Active model: ${ZMENU_AI_MODEL}"
+    fi
+    pause
+}
+
+_ai_set_context_length() {
+    header
+    echo -e "${BCYN}┄ CONTEXT WINDOW SIZE${NC}"
+    echo ""
+    echo -e "  Current: ${BOLD}${ZMENU_AI_CONTEXT_LENGTH}${NC} tokens"
+    echo ""
+    echo -e "  ${DIM}Controls how many tokens Ollama allocates (num_ctx).${NC}"
+    echo -e "  ${DIM}Larger = more context but slower prefill and more memory.${NC}"
+    echo ""
+    echo "  Presets:"
+    echo -e "   1)  4096     ${DIM}— minimal, fast${NC}"
+    echo -e "   2)  8192     ${DIM}— recommended default${NC}"
+    echo -e "   3)  16384    ${DIM}— balanced${NC}"
+    echo -e "   4)  32768    ${DIM}— long documents${NC}"
+    echo -e "   5)  65536    ${DIM}— very long context${NC}"
+    echo -e "   6)  Custom"
+    echo ""
+    read -rp "  Select (1-6): " n
+    local new_ctx=""
+    case $n in
+        1) new_ctx=4096 ;; 2) new_ctx=8192 ;; 3) new_ctx=16384 ;;
+        4) new_ctx=32768 ;; 5) new_ctx=65536 ;;
+        6) read -rp "  Enter context length (1024-262144): " custom
+           if [[ "$custom" =~ ^[0-9]+$ ]] && [[ "$custom" -ge 1024 ]] && [[ "$custom" -le 262144 ]]; then
+               new_ctx="$custom"
+               if [[ "$custom" -gt 65536 ]]; then
+                   echo -e "  ${WARN}  Large context will use significant memory"
+                   confirm "Continue?" || { pause; return; }
+               fi
+           else
+               echo -e "  ${FAIL}  Invalid"; pause; return
+           fi ;;
+        *) echo -e "${RED}  Invalid.${NC}"; pause; return ;;
+    esac
+    ZMENU_AI_CONTEXT_LENGTH="$new_ctx"
+    if grep -q "ZMENU_AI_CONTEXT_LENGTH" "$ZMENU_CONFIG_FILE"; then
+        sed -i "s|^ZMENU_AI_CONTEXT_LENGTH=.*|ZMENU_AI_CONTEXT_LENGTH=${new_ctx}|" "$ZMENU_CONFIG_FILE"
+    else
+        echo "ZMENU_AI_CONTEXT_LENGTH=${new_ctx}" >> "$ZMENU_CONFIG_FILE"
+    fi
+    echo -e "  ${OK}  Context window: ${new_ctx} tokens"
+    pause
+}
+
+# ── LM Studio sub-menu ─────────────────────────────────────
+_ai_sub_lms() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ LM STUDIO ────────────────────────────────────────────${NC}"
+        echo ""
+        if [[ "$D_LMS_RUNNING" == true ]]; then
+            echo -e "  Status:  ${OK} running at ${D_LMS_URL}"
+            echo -e "  ${DIM}Models visible via API:${NC}"
+            for m in "${D_LMS_MODELS[@]}"; do echo "    · $m"; done
+        else
+            echo -e "  Status:  ${IDLE} stopped (optional)"
+        fi
+        echo ""
+        local lms_dir="${HOME}/.lmstudio/models"
+        echo -e "  ${DIM}GGUF files on disk:${NC}"
+        if [[ -d "$lms_dir" ]]; then
+            find "$lms_dir" -name "*.gguf" 2>/dev/null | while read -r f; do
+                printf "    %-50s  %s\n" "$(basename "$f")" "$(du -sh "$f" 2>/dev/null | cut -f1)"
+            done
+        else
+            echo "    ${lms_dir} not found"
+        fi
+        echo ""
+        echo "   1)  Start server    2)  Stop server    r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            1) lms server start 2>/dev/null && echo -e "  ${OK}  Started" || echo -e "  ${FAIL}  Failed"
+               sleep 2; _disc_lms; pause ;;
+            2) lms server stop 2>/dev/null && echo -e "  ${OK}  Stopped" || echo -e "  ${FAIL}  Failed"
+               sleep 1; _disc_lms; pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ── Open WebUI sub-menu ────────────────────────────────────
+_ai_sub_owui() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ OPEN WEBUI ───────────────────────────────────────────${NC}"
+        echo ""
+        if curl -sf "${OWUI_URL}" >/dev/null 2>&1; then
+            echo -e "  Status:  ${OK} running at ${OWUI_URL}"
+            docker inspect --format '  Container: {{.State.Status}}' open-webui 2>/dev/null || true
+        else
+            echo -e "  Status:  ${IDLE} not running"
+        fi
+        echo ""
+        if $D_OLLAMA_RUNNING; then
+            echo -e "  Ollama backend: ${OK} reachable"
+        else
+            echo -e "  Ollama backend: ${FAIL} not running"
+        fi
+        echo ""
+        echo "   1)  Open in browser"
+        echo "   2)  Restart container"
+        echo "   3)  Stop container"
+        echo "   4)  Start container"
+        echo "   5)  View logs (last 50)"
+        echo ""
+        echo "   r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            1) if command -v xdg-open >/dev/null 2>&1; then xdg-open "${OWUI_URL}" &>/dev/null &
+               else echo "  Open: ${OWUI_URL}"; fi
+               pause ;;
+            2) docker restart open-webui 2>/dev/null && echo -e "  ${OK}  Restarted" || echo -e "  ${FAIL}  Failed"; pause ;;
+            3) docker stop open-webui 2>/dev/null && echo -e "  ${OK}  Stopped" || echo -e "  ${FAIL}  Failed"; pause ;;
+            4) docker start open-webui 2>/dev/null && echo -e "  ${OK}  Started" || echo -e "  ${FAIL}  Failed"; pause ;;
+            5) header; echo -e "${BCYN}┄ OPEN WEBUI LOGS${NC}"; echo ""
+               docker logs --tail 50 open-webui 2>/dev/null | sed 's/^/  /' || echo "  No logs"
+               pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ──────────────────────────────────────────────────────────
+#  MODULE 4: APPS & SERVICES (Docker)
+# ──────────────────────────────────────────────────────────
+
+mod_apps_services() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ APPS & SERVICES ──────────────────────────────────────${NC}"
+        echo ""
+        if [[ "$D_DOCKER_RUNNING" == true ]]; then
+            echo -e "  ${OK}  Docker running"
+            echo ""
+            docker ps --format "  {{.Names}}: {{.Status}} · {{.Ports}}" 2>/dev/null || echo "  no containers"
+        else
+            echo -e "  ${FAIL}  Docker not running"
+        fi
+        echo ""
+        echo "   a)  Container list         (status · resources)"
+        echo "   b)  Container logs         (pick container)"
+        echo "   c)  System prune           (clean unused)"
+        echo "   d)  Start a service        (n8n · SearXNG · Crawl4AI · Open WebUI)"
+        echo "   e)  Stop a container"
+        echo "   f)  Restart a container"
+        echo ""
+        echo "   E)  Export    C)  ✦ Ask AI    r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            a) _docker_list; pause ;;
+            b) _docker_logs ;;
+            c) _docker_prune ;;
+            d) _docker_start ;;
+            e) _docker_stop ;;
+            f) _docker_restart ;;
+            E) export_report "Docker"; pause ;;
+            C) cc_launch "Docker Expert" \
+                "Review container state. Identify unhealthy containers, resource issues, or misconfigurations."; pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+_docker_list() {
+    header
+    echo -e "${BCYN}┄ RUNNING CONTAINERS${NC}"
+    docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null | sed 's/^/  /' || echo "  None"
+    echo ""
+    echo -e "${BCYN}┄ RESOURCE USAGE${NC}"
+    docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | sed 's/^/  /' || echo "  None"
+    echo ""
+    echo -e "${BCYN}┄ IMAGES${NC}"
+    docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" 2>/dev/null | sed 's/^/  /' | head -20
+}
+
+_docker_logs() {
+    header
+    echo -e "${BCYN}┄ CONTAINER LOGS${NC}"
+    echo ""
+    if [[ ${#D_CONTAINERS[@]} -eq 0 ]]; then echo "  No running containers"; pause; return; fi
+    local i=1
+    for c in "${D_CONTAINERS[@]}"; do echo "   ${i})  ${c%%:*}"; ((i++)); done
+    echo ""
+    read -rp "  Select container: " n
+    if [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -le ${#D_CONTAINERS[@]} ]]; then
+        local name="${D_CONTAINERS[$((n-1))]%%:*}"
+        header
+        echo -e "${BCYN}┄ LOGS: ${name}${NC}"
+        docker logs --tail 50 --timestamps "$name" 2>&1 | sed 's/^/  /'
+    fi
+    pause
+}
+
+_docker_prune() {
+    header
+    echo -e "${BRED}┄ DOCKER PRUNE${NC}"
+    docker system df 2>/dev/null | sed 's/^/  /'
+    echo ""
+    if confirm "Prune stopped containers, unused networks, dangling images?"; then
+        docker system prune -f 2>/dev/null | sed 's/^/  /'
+        echo -e "  ${OK}  Done"
+    fi
+    pause
+}
+
+_docker_start() {
+    header
+    echo -e "${BCYN}┄ START SERVICES${NC}"
+    echo ""
+    echo "   1)  n8n          (workflow automation · :5678)"
+    echo "   2)  SearXNG      (private web search · :8080)"
+    echo "   3)  Crawl4AI     (web scraping · :11235)"
+    echo "   4)  Open WebUI   (AI chat interface · :3000)"
+    echo ""
+    echo "   r)  Back"
+    echo ""
+    read -rp "  Select: " n
+    local name url image vol port
+    case $n in
+        1) name=n8n;      port=5678;  image=n8nio/n8n;                vol="-v n8n_data:/home/node/.n8n" ;;
+        2) name=searxng;  port=8080;  image=searxng/searxng;          vol="" ;;
+        3) name=crawl4ai; port=11235; image=unclecode/crawl4ai:latest; vol="" ;;
+        4) docker run -d --name open-webui --restart unless-stopped \
+               -p 127.0.0.1:3000:8080 \
+               --add-host=host.docker.internal:host-gateway \
+               -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+               -v open-webui:/app/backend/data \
+               ghcr.io/open-webui/open-webui:main 2>/dev/null \
+               && echo -e "  ${OK}  Open WebUI started → http://localhost:3000" \
+               || echo -e "  ${WARN}  Already running or image missing"
+           pause; return ;;
+        r|R) return ;;
+        *) echo -e "${RED}  Invalid.${NC}"; sleep 1; return ;;
+    esac
+    # shellcheck disable=SC2086
+    docker run -d --name "$name" --restart unless-stopped \
+        -p "127.0.0.1:${port}:${port}" $vol "$image" 2>/dev/null \
+        && echo -e "  ${OK}  ${name} started on 127.0.0.1:${port}" \
+        || echo -e "  ${WARN}  Already running or image missing"
+    pause
+}
+
+_docker_pick_container() {
+    local scope="${1:-running}"
+    local -a ctrs=()
+    if [[ "$scope" == "all" ]]; then
+        while IFS= read -r line; do ctrs+=("$line"); done < <(docker ps -a --format '{{.Names}}' 2>/dev/null)
+    else
+        while IFS= read -r line; do ctrs+=("$line"); done < <(docker ps --format '{{.Names}}' 2>/dev/null)
+    fi
+    if [[ ${#ctrs[@]} -eq 0 ]]; then echo "  No containers found"; echo ""; echo "NONE"; return; fi
+    local i=1
+    for c in "${ctrs[@]}"; do
+        local status; status=$(docker inspect --format '{{.State.Status}}' "$c" 2>/dev/null)
+        echo "   ${i})  ${c}  (${status})"; ((i++))
+    done
+    echo ""
+    read -rp "  Select (or Enter to cancel): " n
+    if [[ -z "$n" ]]; then echo "CANCEL"; return; fi
+    if [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -ge 1 ]] && [[ "$n" -le ${#ctrs[@]} ]]; then
+        echo "${ctrs[$((n-1))]}"
+    else echo "INVALID"; fi
+}
+
+_docker_stop() {
+    header
+    echo -e "${BCYN}┄ STOP CONTAINER${NC}"
+    echo ""
+    local name; name=$(_docker_pick_container "running" | tail -1)
+    case "$name" in NONE|CANCEL|INVALID) pause; return ;; esac
+    if confirm "Stop container: ${name}?"; then
+        docker stop "$name" 2>/dev/null && echo -e "  ${OK}  Stopped: ${name}" || echo -e "  ${FAIL}  Failed"
+    fi
+    pause
+}
+
+_docker_restart() {
+    header
+    echo -e "${BCYN}┄ RESTART CONTAINER${NC}"
+    echo ""
+    local name; name=$(_docker_pick_container "all" | tail -1)
+    case "$name" in NONE|CANCEL|INVALID) pause; return ;; esac
+    docker restart "$name" 2>/dev/null && echo -e "  ${OK}  Restarted: ${name}" || echo -e "  ${FAIL}  Failed"
+    pause
+}
+
+# ──────────────────────────────────────────────────────────
+#  MODULE 5: HARDWARE (CPU, GPU, NPU, NVMe, power, thermals)
+# ──────────────────────────────────────────────────────────
+
+mod_hardware() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ HARDWARE ─────────────────────────────────────────────${NC}"
+        echo ""
+        echo "   a)  Full resource audit     (CPU · RAM · Disk · Swap)"
+        echo "   b)  Live process monitor    (htop / top)"
+        echo "   c)  Thermal dashboard       (CPU · GPU · battery)"
+        echo "   d)  Hardware profile        (CPU · RAM · PCIe · NVMe)"
+        echo "   e)  Power & battery         (TDP · profiles · uptime)"
+        echo "   f)  GPU full status         (ROCm · VRAM · compute)"
+        echo "   g)  NPU status              (XDNA driver · device)"
+        echo "   h)  Check HSA env var       (needed for GPU inference)"
+        echo ""
+        echo "   E)  Export    C)  ✦ Ask AI    r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            a) _sys_resources; pause ;;
+            b) htop 2>/dev/null || top ;;
+            c) _sys_thermal; pause ;;
+            d) _sys_hardware; pause ;;
+            e) _sys_power; pause ;;
+            f) _hw_gpu; pause ;;
+            g) _hw_npu; pause ;;
+            h) _hw_hsa; pause ;;
+            E) export_report "Hardware"; pause ;;
+            C) cc_launch "Hardware Expert" \
+                "Review system hardware, GPU/NPU status, thermals, and power. Flag any issues and suggest optimisations."; pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+_sys_resources() {
+    header
+    echo -e "${BCYN}┄ FULL RESOURCE AUDIT${NC}"
+    echo ""
+    echo -e "${BCYN}┄ CPU${NC}"
+    echo "  ${D_CPU_MODEL}"
+    echo "  ${D_CPU_CORES} threads, governor: ${D_CPU_GOVERNOR}"
+    echo ""
+    echo -e "${BCYN}┄ MEMORY${NC}"
+    free -h | awk '/^Mem/{printf "  RAM:  %s used / %s total (%s free, %s buff/cache)\n",$3,$2,$4,$6}'
+    free -h | awk '/^Swap/{printf "  Swap: %s used / %s total (%s free)\n",$3,$2,$4}'
+    echo ""
+    echo -e "${BCYN}┄ DISK${NC}"
+    df -h / | awk 'NR==2{printf "  Root: %s used / %s total (%s free, %s full)\n",$3,$2,$4,$5}'
+    echo ""
+    echo -e "${BCYN}┄ LOAD${NC}"
+    awk '{printf "  Load average: %s  %s  %s\n",$1,$2,$3}' /proc/loadavg
+    echo ""
+    echo -e "${BCYN}┄ TOP PROCESSES (by CPU)${NC}"
+    ps aux --sort=-%cpu | awk 'NR<=6{printf "  %-20s %5s%% CPU  %5s%% MEM\n",$11,$3,$4}' 2>/dev/null || true
+}
+
+_sys_thermal() {
+    header
+    echo -e "${BCYN}┄ THERMAL DASHBOARD${NC}"
+    echo ""
+    if command -v sensors >/dev/null 2>&1; then
+        sensors 2>/dev/null | grep -E '°C|temp|Tctl|Tdie|edge' | sed 's/^/  /'
+    else
+        echo "  lm-sensors not installed: sudo apt install lm-sensors"
+    fi
+    echo ""
+    echo -e "${BCYN}┄ GPU TEMPERATURE${NC}"
+    [[ -n "$D_GPU_TEMP" ]] && echo "  GPU: ${D_GPU_TEMP}°C" || echo "  Not available"
+    echo ""
+    echo -e "${BCYN}┄ BATTERY${NC}"
+    if [[ -d /sys/class/power_supply/BAT0 ]]; then
+        local cap stat
+        cap=$(cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || echo "?")
+        stat=$(cat /sys/class/power_supply/BAT0/status 2>/dev/null || echo "?")
+        echo "  Battery: ${cap}% (${stat})"
+    else
+        echo "  No battery detected (AC power)"
+    fi
+}
+
+_sys_hardware() {
+    header
+    echo -e "${BCYN}┄ HARDWARE PROFILE${NC}"
+    echo ""
+    echo -e "${BCYN}┄ CPU${NC}"
+    lscpu 2>/dev/null | grep -E 'Model name|Architecture|CPU\(s\)|Thread|Core|Socket|MHz|cache' | sed 's/^/  /'
+    echo ""
+    echo -e "${BCYN}┄ MEMORY${NC}"
+    sudo dmidecode -t memory 2>/dev/null | grep -E 'Size|Speed|Type:|Manufacturer' \
+        | grep -v "No Module" | head -8 | sed 's/^/  /' || free -h | head -2 | sed 's/^/  /'
+    echo ""
+    echo -e "${BCYN}┄ STORAGE${NC}"
+    lsblk -d -o NAME,SIZE,MODEL,TRAN 2>/dev/null | sed 's/^/  /'
+    echo ""
+    echo -e "${BCYN}┄ PCIe DEVICES (GPU/NPU/NVMe)${NC}"
+    lspci 2>/dev/null | grep -iE 'vga|display|3d|npu|nvme|accelerat' | sed 's/^/  /'
+}
+
+_sys_power() {
+    header
+    echo -e "${BCYN}┄ POWER & BATTERY${NC}"
+    echo ""
+    echo -e "${BCYN}┄ POWER PROFILE${NC}"
+    if command -v powerprofilesctl >/dev/null 2>&1; then
+        echo "  Active: $(powerprofilesctl get 2>/dev/null || echo 'unknown')"
+        echo "  Available:"
+        powerprofilesctl list 2>/dev/null | sed 's/^/    /' || true
+    else
+        echo "  power-profiles-daemon not found"
+    fi
+    echo ""
+    if [[ -d /sys/class/power_supply/BAT0 ]]; then
+        local cap stat watt
+        cap=$(cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || echo "?")
+        stat=$(cat /sys/class/power_supply/BAT0/status 2>/dev/null || echo "?")
+        watt=$(awk '{printf "%.1f", $1/1000000}' /sys/class/power_supply/BAT0/power_now 2>/dev/null || echo "?")
+        echo -e "${BCYN}┄ BATTERY${NC}"
+        echo "  Level: ${cap}%  Status: ${stat}  Draw: ${watt}W"
+    fi
+    echo ""
+    echo -e "${BCYN}┄ CPU FREQUENCY${NC}"
+    cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq 2>/dev/null \
+        | awk '{printf "  Core %-3d  %5.0f MHz\n", NR-1, $1/1000}' | head -24
+    echo ""
+    echo -e "${BCYN}┄ UPTIME${NC}"
+    uptime -p | sed 's/^/  /'
+}
+
+_hw_gpu() {
+    header
+    echo -e "${BCYN}┄ GPU: ${D_GPU_GFX:-unknown}  driver: ${D_GPU_DRIVER:-none}${NC}"
+    echo ""
+    case "$D_GPU_DRIVER" in
+        rocm)
+            rocm-smi 2>/dev/null | grep -v "^=\|^$" | sed 's/^/  /'
+            echo ""
+            echo -e "${BCYN}┄ VRAM${NC}"
+            rocm-smi --showmeminfo vram 2>/dev/null | sed 's/^/  /'
+            echo ""
+            echo -e "${BCYN}┄ COMPUTE DEVICES${NC}"
+            rocminfo 2>/dev/null | grep -E "Name|Marketing|Chip|Compute|Max Clock" | head -20 | sed 's/^/  /'
+            ;;
+        nvidia)
+            nvidia-smi 2>/dev/null | sed 's/^/  /'
+            ;;
+        amdgpu-sysfs)
+            echo -e "  ${WARN}  rocm-smi not in PATH — add /opt/rocm/bin to PATH"
+            for d in /sys/class/hwmon/hwmon*; do
+                local n; n=$(cat "$d/name" 2>/dev/null || echo "")
+                [[ "$n" != *amdgpu* ]] && continue
+                echo "  Device: $n"
+                for f in "$d"/temp*_input; do
+                    [[ -f "$f" ]] && awk '{printf "  Temp: %.1f°C\n", $1/1000}' "$f"
+                done
+            done
+            ;;
+        *) echo -e "  ${FAIL}  No GPU driver detected" ;;
+    esac
+    echo ""
+    echo -e "${BCYN}┄ HSA_OVERRIDE_GFX_VERSION${NC}"
+    local hsa="${HSA_OVERRIDE_GFX_VERSION:-NOT SET}"
+    echo "  Current value: ${hsa}"
+    if [[ "$hsa" == "NOT SET" && -n "$D_GPU_GFX" ]]; then
+        echo -e "  ${BYEL}Fix: export HSA_OVERRIDE_GFX_VERSION=${D_GPU_GFX#gfx}${NC}"
+    fi
+}
+
+_hw_npu() {
+    header
+    echo -e "${BCYN}┄ NPU / XDNA${NC}"
+    echo ""
+    echo "  Kernel modules:"
+    for mod in amdxdna ryzen_ai npu amd_ipu; do
+        lsmod 2>/dev/null | grep -qi "$mod" && echo -e "  ${OK}  ${mod}"
+    done
+    echo ""
+    echo "  Device nodes:"
+    ls /dev/accel* 2>/dev/null | sed 's/^/    /' || echo "    none at /dev/accel*"
+    echo ""
+    echo "  Recent dmesg (NPU/XDNA):"
+    sudo dmesg 2>/dev/null | grep -iE "npu|xdna|ryzen.ai|ipu" | tail -8 | sed 's/^/    /'
+}
+
+_hw_hsa() {
+    header
+    echo -e "${BCYN}┄ HSA / ROCm ENVIRONMENT${NC}"
+    echo ""
+    local gfx_num="${D_GPU_GFX#gfx}"
+    local gfx_hint=""
+    if [[ ${#gfx_num} -eq 4 ]]; then
+        gfx_hint="${gfx_num:0:2}.${gfx_num:2:1}.${gfx_num:3:1}"
+    else
+        gfx_hint="${gfx_num}"
+    fi
+    local hsa_cur="${HSA_OVERRIDE_GFX_VERSION:-NOT SET}"
+    echo "  GPU GFX detected:            ${D_GPU_GFX:-unknown}"
+    echo "  Recommended HSA override:    ${gfx_hint}"
+    echo "  Current HSA_OVERRIDE:        ${hsa_cur}"
+    echo ""
+    if [[ "$hsa_cur" == "NOT SET" ]]; then
+        echo -e "  ${FAIL}  HSA_OVERRIDE_GFX_VERSION not set"
+        echo "  Run:  export HSA_OVERRIDE_GFX_VERSION=${gfx_hint}"
+        echo "  Permanent: echo 'export HSA_OVERRIDE_GFX_VERSION=${gfx_hint}' >> ~/.bashrc"
+    elif [[ "$hsa_cur" == "$gfx_hint" ]]; then
+        echo -e "  ${OK}  Matches detected GPU"
+    else
+        echo -e "  ${WARN}  Set to ${hsa_cur} but recommended is ${gfx_hint}"
+    fi
+}
+
+# ──────────────────────────────────────────────────────────
+#  MODULE 6: SECURITY & PRIVACY
+# ──────────────────────────────────────────────────────────
+
+mod_security() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ SECURITY & PRIVACY ───────────────────────────────────${NC}"
+        echo ""
+        echo -e "  ${BOLD}Security${NC}"
+        echo "   a)  Open ports audit"
+        echo "   b)  Firewall status        (UFW + DOCKER-USER)"
+        echo "   c)  Failed login audit"
+        echo "   d)  Sudo/auth events       (last 48h)"
+        echo "   e)  Rootkit quick check"
+        echo "   f)  Outbound connections"
+        echo ""
+        echo -e "  ${BOLD}Privacy & Telemetry${NC}"
+        echo "   g)  Live traffic monitor   (nethogs)"
+        echo "   h)  Telemetry status       (opt-out vars)"
+        echo "   i)  Browser privacy        (Chromium + Firefox)"
+        echo "   j)  Tailscale              (status · stop · disable)"
+        echo "   k)  Service audit          (Ollama · Docker · snap)"
+        echo "   l)  Apply privacy lockdown (guided or one-shot)"
+        echo ""
+        echo "   E)  Export    C)  ✦ Ask AI    r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            a) _sec_ports; pause ;;
+            b) _sec_firewall; pause ;;
+            c) _sec_failed_logins; pause ;;
+            d) _sec_sudo; pause ;;
+            e) _sec_rootkit; pause ;;
+            f) _sec_outbound; pause ;;
+            g) _priv_traffic ;;
+            h) _priv_telemetry_status; pause ;;
+            i) _priv_browser ;;
+            j) _priv_tailscale ;;
+            k) _priv_service_audit; pause ;;
+            l) _priv_lockdown ;;
+            E) export_report "Security & Privacy"; pause ;;
+            C) cc_launch "Security & Privacy Auditor" \
+                "Full security and privacy audit. Check: open ports, UFW rules, DOCKER-USER chain, outbound connections, telemetry opt-out, services phoning home. Be specific about risks and fixes."; pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+_sec_ports() {
+    header
+    echo -e "${BCYN}┄ LISTENING PORTS${NC}"
+    ss -tlunp 2>/dev/null | sed 's/^/  /'
+}
+
+_sec_firewall() {
+    header
+    echo -e "${BCYN}┄ UFW${NC}"
+    sudo ufw status verbose 2>/dev/null | sed 's/^/  /' || echo "  ufw not installed"
+    echo ""
+    echo -e "${BCYN}┄ DOCKER-USER CHAIN${NC}"
+    local rules; rules=$(sudo iptables -L DOCKER-USER --line-numbers -n 2>/dev/null)
+    if echo "$rules" | grep -q "DROP"; then
+        echo -e "  ${OK}  DOCKER-USER active — UFW bypass protected"
+    else
+        echo -e "  ${FAIL}  DOCKER-USER missing — containers may bypass UFW"
+    fi
+    echo "$rules" | sed 's/^/  /'
+}
+
+_sec_failed_logins() {
+    header
+    echo -e "${BCYN}┄ FAILED LOGINS${NC}"
+    local logfile=""
+    for f in /var/log/auth.log /var/log/secure; do [[ -f "$f" ]] && logfile="$f" && break; done
+    if [[ -n "$logfile" ]]; then
+        echo "  Source: $logfile"
+        echo "  Top offending IPs:"
+        sudo grep -i "failed\|invalid\|authentication failure" "$logfile" 2>/dev/null \
+            | grep -Eo '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' \
+            | sort | uniq -c | sort -rn | head -10 | sed 's/^/    /'
+        echo "  Last 20 events:"
+        sudo grep -i "failed\|invalid\|authentication failure" "$logfile" 2>/dev/null \
+            | tail -20 | sed 's/^/    /'
+    else
+        sudo journalctl -u ssh --since "7 days ago" 2>/dev/null \
+            | grep -i "fail\|invalid" | tail -20 | sed 's/^/  /'
+    fi
+}
+
+_sec_sudo() {
+    header
+    echo -e "${BCYN}┄ SUDO / AUTH EVENTS (last 48h)${NC}"
+    sudo journalctl _COMM=sudo --since "48 hours ago" 2>/dev/null | tail -40 | sed 's/^/  /'
+    echo ""
+    echo -e "${BCYN}┄ LAST LOGINS${NC}"
+    last -n 15 2>/dev/null | sed 's/^/  /'
+}
+
+_sec_rootkit() {
+    header
+    echo -e "${BCYN}┄ ROOTKIT SCAN${NC}"
+    if command -v rkhunter >/dev/null 2>&1; then
+        sudo rkhunter --check --skip-keypress --report-warnings-only 2>&1 | sed 's/^/  /'
+    else
+        echo "  rkhunter not installed: sudo apt install rkhunter"
+    fi
+    echo ""
+    if command -v chkrootkit >/dev/null 2>&1; then
+        sudo chkrootkit 2>&1 | grep -v "not found\|not tested" | sed 's/^/  /' | head -40
+    else
+        echo "  chkrootkit not installed: sudo apt install chkrootkit"
+    fi
+    echo ""
+    echo -e "${BCYN}┄ UNUSUAL SUID BINARIES${NC}"
+    sudo find / -perm /4000 2>/dev/null \
+        | grep -vE "^/usr/bin|^/usr/sbin|^/bin|^/sbin|^/usr/lib|^/snap" \
+        | head -20 | sed 's/^/    /' || echo "  None outside standard paths"
+}
+
+_sec_outbound() {
+    header
+    echo -e "${BCYN}┄ OUTBOUND CONNECTIONS (non-loopback)${NC}"
+    ss -tnp 2>/dev/null | awk 'NR>1 && $5 !~ /127\.|::1|\*/' | sed 's/^/  /' | head -30
+}
+
+_priv_traffic() {
+    header
+    echo -e "${BCYN}┄ LIVE TRAFFIC MONITOR${NC}"
+    echo ""
+    if ! command -v nethogs >/dev/null 2>&1; then
+        echo -e "  ${WARN}  nethogs not installed"
+        if confirm "Install nethogs now?"; then sudo apt install nethogs -y; else pause; return; fi
+    fi
+    echo "  Launching nethogs — press q to quit..."
+    sleep 1
+    sudo nethogs 2>/dev/null || echo -e "  ${FAIL}  nethogs failed"
+    pause
+}
+
+_priv_telemetry_status() {
+    header
+    echo -e "${BCYN}┄ TELEMETRY OPT-OUT STATUS${NC}"
+    echo ""
+    local all_ok=true
+    local vars=(
+        "DO_NOT_TRACK:1" "TELEMETRY_DISABLED:1" "DISABLE_TELEMETRY:1"
+        "DOTNET_CLI_TELEMETRY_OPTOUT:1" "NEXT_TELEMETRY_DISABLED:1"
+        "HOMEBREW_NO_ANALYTICS:1" "SAM_CLI_TELEMETRY:0" "SCARF_ANALYTICS:false"
+    )
+    for entry in "${vars[@]}"; do
+        local var="${entry%%:*}" expected="${entry##*:}"
+        local current; current=$(printenv "$var" 2>/dev/null || echo "NOT SET")
+        if [[ "$current" == "$expected" ]]; then
+            echo -e "  ${OK}  ${var}=${current}"
+        else
+            echo -e "  ${FAIL}  ${var}=${current}  ${DIM}(should be ${expected})${NC}"
+            all_ok=false
+        fi
+    done
+    echo ""
+    if [[ "$all_ok" == false ]]; then
+        echo -e "  ${WARN}  Some variables missing. Run option l) to apply lockdown."
+    else
+        echo -e "  ${OK}  All telemetry opt-out variables set"
+    fi
+}
+
+_priv_browser() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ BROWSER PRIVACY${NC}"
+        echo ""
+        echo "   a)  Chromium — apply privacy flags"
+        echo "   b)  Chromium — check current flags"
+        echo "   c)  Firefox  — disable telemetry"
+        echo "   r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            a) _priv_chromium_apply; pause ;;
+            b) _priv_chromium_check; pause ;;
+            c) _priv_firefox; pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+_priv_chromium_apply() {
+    header
+    echo -e "${BCYN}┄ CHROMIUM PRIVACY FLAGS${NC}"
+    echo ""
+    local flags_file="${HOME}/.config/chromium-flags.conf"
+    cat > "$flags_file" << 'FLAGSEOF'
+--disable-background-networking
+--disable-client-side-phishing-detection
+--disable-sync
+--disable-translate
+--no-first-run
+--disable-metrics-reporting
+--disable-crash-reporter
+--disable-features=ChromeWhatsNewUI
+FLAGSEOF
+    echo -e "  ${OK}  Privacy flags written to: ${flags_file}"
+    cat "$flags_file" | sed 's/^/    /'
+    echo ""
+    echo -e "  ${DIM}  Restart Chromium for changes to take effect${NC}"
+}
+
+_priv_chromium_check() {
+    header
+    echo -e "${BCYN}┄ CHROMIUM FLAGS CHECK${NC}"
+    echo ""
+    local flags_file="${HOME}/.config/chromium-flags.conf"
+    if [[ -f "$flags_file" ]]; then
+        echo -e "  ${OK}  Flags file exists"
+        cat "$flags_file" | sed 's/^/    /'
+    else
+        echo -e "  ${WARN}  No flags file — run option a)"
+    fi
+}
+
+_priv_firefox() {
+    header
+    echo -e "${BCYN}┄ FIREFOX TELEMETRY${NC}"
+    echo ""
+    local prefs; prefs=$(find "${HOME}/.mozilla/firefox" -name "prefs.js" 2>/dev/null | head -1)
+    if [[ -z "$prefs" ]]; then echo -e "  ${WARN}  Firefox profile not found"; pause; return; fi
+    echo "  Profile: $prefs"
+    local settings=("toolkit.telemetry.enabled" "toolkit.telemetry.unified" "datareporting.healthreport.uploadEnabled" "app.shield.optoutstudies.enabled")
+    for s in "${settings[@]}"; do
+        if grep -q "$s" "$prefs" 2>/dev/null; then
+            local val; val=$(grep "$s" "$prefs" | grep -o 'true\|false')
+            [[ "$val" == "false" ]] && echo -e "  ${OK}  ${s} = false" || echo -e "  ${WARN}  ${s} = ${val}"
+        else
+            echo -e "  ${IDLE}  ${s} = not set"
+        fi
+    done
+    echo ""
+    if confirm "Apply telemetry opt-out?"; then
+        echo -e "  ${BYEL}  Note: Firefox must be closed${NC}"
+        local tmpfile; tmpfile=$(mktemp)
+        grep -v "toolkit.telemetry\|datareporting\|app.shield" "$prefs" > "$tmpfile"
+        cat >> "$tmpfile" << 'FFEOF'
+user_pref("toolkit.telemetry.enabled", false);
+user_pref("toolkit.telemetry.unified", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("app.shield.optoutstudies.enabled", false);
+FFEOF
+        cp "$prefs" "${prefs}.bak"
+        mv "$tmpfile" "$prefs"
+        echo -e "  ${OK}  Applied. Backup: ${prefs}.bak"
+    fi
+}
+
+_priv_tailscale() {
+    header
+    echo -e "${BCYN}┄ TAILSCALE${NC}"
+    echo ""
+    if ! command -v tailscale >/dev/null 2>&1; then echo -e "  ${IDLE}  Not installed"; pause; return; fi
+    local ts_status; ts_status=$(tailscale status 2>/dev/null || echo "not running")
+    local ts_active; ts_active=$(systemctl is-active tailscaled 2>/dev/null)
+    local ts_enabled; ts_enabled=$(systemctl is-enabled tailscaled 2>/dev/null)
+    echo "  Service: ${ts_active}    Autostart: ${ts_enabled}"
+    echo "$ts_status" | sed 's/^/  /' | head -10
+    echo ""
+    echo "   a)  Stop    b)  Disable autostart    c)  Stop + disable    d)  Start    r)  Back"
+    read -rp "  Selection: " ch
+    case $ch in
+        a) sudo systemctl stop tailscaled && echo -e "  ${OK}  Stopped" || echo -e "  ${FAIL}  Failed"; pause ;;
+        b) sudo systemctl disable tailscaled && echo -e "  ${OK}  Disabled" || echo -e "  ${FAIL}  Failed"; pause ;;
+        c) sudo systemctl stop tailscaled && sudo systemctl disable tailscaled && echo -e "  ${OK}  Done" || echo -e "  ${FAIL}  Failed"; pause ;;
+        d) sudo systemctl start tailscaled && echo -e "  ${OK}  Started" || echo -e "  ${FAIL}  Failed"; pause ;;
+    esac
+}
+
+_priv_service_audit() {
+    header
+    echo -e "${BCYN}┄ SERVICE PHONE-HOME AUDIT${NC}"
+    echo ""
+    echo -e "${BCYN}  Ollama${NC}"
+    local ollama_override="/etc/systemd/system/ollama.service.d/override.conf"
+    if [[ -f "$ollama_override" ]] && grep -q "DO_NOT_TRACK" "$ollama_override"; then
+        echo -e "  ${OK}  Telemetry override present"
+    else
+        echo -e "  ${WARN}  No telemetry override — run lockdown"
+    fi
+    echo ""
+    echo -e "${BCYN}  Docker${NC}"
+    [[ -f "/etc/docker/daemon.json" ]] && { echo -e "  ${OK}  daemon.json present"; cat /etc/docker/daemon.json | sed 's/^/    /'; } || echo -e "  ${IDLE}  No daemon.json"
+    echo ""
+    echo -e "${BCYN}  Snap${NC}"
+    local snap_metrics; snap_metrics=$(snap get system metrics.enable 2>/dev/null || echo "unknown")
+    [[ "$snap_metrics" == "false" ]] && echo -e "  ${OK}  Metrics disabled" || echo -e "  ${WARN}  Metrics: ${snap_metrics}"
+    echo ""
+    echo -e "${BCYN}  Current outbound${NC}"
+    ss -tnp 2>/dev/null | awk 'NR>1 && $5 !~ /127\.|::1|\*/' | sed 's/^/  /' | head -15
+    [[ -z "$(ss -tnp 2>/dev/null | awk 'NR>1 && $5 !~ /127\.|::1|\*/')" ]] && echo -e "  ${OK}  No external connections"
+}
+
+_priv_lockdown() {
+    header
+    echo -e "${BCYN}┄ PRIVACY LOCKDOWN${NC}"
+    echo ""
+    echo "   a)  Guided  — step through each item"
+    echo "   b)  One-shot — apply everything"
+    echo "   r)  Back"
+    echo ""
+    read -rp "  Selection: " ch
+    case $ch in a) _priv_lockdown_guided ;; b) _priv_lockdown_oneshot ;; esac
+}
+
+_priv_lockdown_guided() {
+    header
+    echo -e "${BCYN}┄ GUIDED PRIVACY LOCKDOWN${NC}"
+    echo ""
+    echo -e "${BOLD}  Step 1: Telemetry env vars${NC}"
+    if confirm "Add telemetry opt-out vars to ~/.bashrc?"; then _priv_apply_env_vars; echo -e "  ${OK}  Done"; else echo -e "  ${DIM}  Skipped${NC}"; fi
+    echo ""
+    echo -e "${BOLD}  Step 2: Ollama override${NC}"
+    if confirm "Create Ollama telemetry override?"; then _priv_apply_ollama_override; echo -e "  ${OK}  Done"; else echo -e "  ${DIM}  Skipped${NC}"; fi
+    echo ""
+    echo -e "${BOLD}  Step 3: Snap metrics${NC}"
+    if confirm "Disable Snap metrics?"; then sudo snap set system metrics.enable=false 2>/dev/null && echo -e "  ${OK}  Done" || echo -e "  ${WARN}  Failed"; else echo -e "  ${DIM}  Skipped${NC}"; fi
+    echo ""
+    echo -e "${BOLD}  Step 4: Tailscale${NC}"
+    if command -v tailscale >/dev/null 2>&1; then
+        if confirm "Stop and disable Tailscale?"; then sudo systemctl stop tailscaled 2>/dev/null; sudo systemctl disable tailscaled 2>/dev/null; echo -e "  ${OK}  Done"; else echo -e "  ${DIM}  Skipped${NC}"; fi
+    else echo -e "  ${IDLE}  Not installed"; fi
+    echo ""
+    echo -e "${BOLD}  Step 5: Chromium flags${NC}"
+    if confirm "Apply Chromium privacy flags?"; then _priv_chromium_apply; else echo -e "  ${DIM}  Skipped${NC}"; fi
+    echo ""
+    echo -e "  ${OK}  Guided lockdown complete"
+    echo -e "  ${DIM}  Run: source ~/.bashrc${NC}"
+    pause
+}
+
+_priv_lockdown_oneshot() {
+    header
+    echo -e "${BCYN}┄ ONE-SHOT PRIVACY LOCKDOWN${NC}"
+    echo ""
+    if ! confirm "Apply ALL privacy settings?"; then return; fi
+    echo ""
+    echo "  [1/5] Telemetry env vars..."; _priv_apply_env_vars && echo -e "  ${OK}  Done" || echo -e "  ${WARN}  Partial"
+    echo "  [2/5] Ollama override..."; _priv_apply_ollama_override && echo -e "  ${OK}  Done" || echo -e "  ${WARN}  Failed"
+    echo "  [3/5] Snap metrics..."; sudo snap set system metrics.enable=false 2>/dev/null && echo -e "  ${OK}  Done" || echo -e "  ${IDLE}  Snap not found"
+    echo "  [4/5] Tailscale..."
+    if command -v tailscale >/dev/null 2>&1; then sudo systemctl stop tailscaled 2>/dev/null; sudo systemctl disable tailscaled 2>/dev/null; echo -e "  ${OK}  Done"; else echo -e "  ${IDLE}  Not installed"; fi
+    echo "  [5/5] Chromium flags..."; _priv_chromium_apply >/dev/null 2>&1 && echo -e "  ${OK}  Done"
+    echo ""
+    echo -e "  ${OK}  Lockdown complete. Run: source ~/.bashrc"
+    pause
+}
+
+_priv_apply_env_vars() {
+    if grep -q "DO_NOT_TRACK" ~/.bashrc; then
+        sed -i '/DO_NOT_TRACK/d; /TELEMETRY_DISABLED/d; /DISABLE_TELEMETRY/d; /DOTNET_CLI_TELEMETRY/d; /NEXT_TELEMETRY/d; /GATSBY_TELEMETRY/d; /NUXT_TELEMETRY/d; /ASTRO_TELEMETRY/d; /HOMEBREW_NO_ANALYTICS/d; /SAM_CLI_TELEMETRY/d; /SCARF_ANALYTICS/d; /Privacy.*Zero Telemetry/d' ~/.bashrc
+    fi
+    printf '\n# Privacy / Zero Telemetry\n' >> ~/.bashrc
+    printf 'export DO_NOT_TRACK=1\nexport TELEMETRY_DISABLED=1\nexport DISABLE_TELEMETRY=1\n' >> ~/.bashrc
+    printf 'export DOTNET_CLI_TELEMETRY_OPTOUT=1\nexport NEXT_TELEMETRY_DISABLED=1\n' >> ~/.bashrc
+    printf 'export GATSBY_TELEMETRY_DISABLED=1\nexport NUXT_TELEMETRY_DISABLED=1\n' >> ~/.bashrc
+    printf 'export ASTRO_TELEMETRY_DISABLED=1\nexport HOMEBREW_NO_ANALYTICS=1\n' >> ~/.bashrc
+    printf 'export SAM_CLI_TELEMETRY=0\nexport SCARF_ANALYTICS=false\n' >> ~/.bashrc
+    source ~/.bashrc 2>/dev/null || true
+}
+
+_priv_apply_ollama_override() {
+    sudo mkdir -p /etc/systemd/system/ollama.service.d
+    sudo tee /etc/systemd/system/ollama.service.d/override.conf > /dev/null << 'OLEOF'
+[Service]
+Environment="DO_NOT_TRACK=1"
+Environment="OLLAMA_NOPRUNE=1"
+OLEOF
+    sudo systemctl daemon-reload
+    sudo systemctl restart ollama 2>/dev/null || true
+}
+
+# ──────────────────────────────────────────────────────────
+#  MODULE 7: MAINTENANCE
+# ──────────────────────────────────────────────────────────
+
+mod_maintenance() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ MAINTENANCE ──────────────────────────────────────────${NC}"
+        echo ""
+        echo "   a)  System updates         (apt check · upgrade)"
+        echo "   b)  Disk audit & cleanup"
+        echo "   c)  SMART disk health"
+        echo "   d)  Journal errors         (last 24h)"
+        echo "   e)  Journal size trim      (vacuum to 200MB)"
+        echo ""
+        echo "   E)  Export    C)  ✦ Ask AI    r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            a) _maint_updates ;;
+            b) _maint_disk ;;
+            c) _maint_smart; pause ;;
+            d) _maint_journal_errors; pause ;;
+            e) _maint_journal_trim; pause ;;
+            E) export_report "Maintenance"; pause ;;
+            C) cc_launch "Maintenance Planner" \
+                "Create a prioritised maintenance plan. Focus on disk space, outdated packages, journal bloat, and warnings."; pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+_maint_updates() {
+    header
+    echo -e "${BCYN}┄ APT UPDATES${NC}"
+    sudo apt update -qq 2>&1 | sed 's/^/  /'
+    echo ""
+    local cnt; cnt=$(apt list --upgradable 2>/dev/null | grep -c "/" || echo 0)
+    apt list --upgradable 2>/dev/null | grep -v "Listing" | sed 's/^/  /' | head -30
+    echo ""
+    if [[ "$cnt" -gt 0 ]]; then
+        echo -e "  ${BYEL}${cnt} package(s) upgradable${NC}"
+        if confirm "Run sudo apt upgrade now?"; then
+            sudo apt upgrade -y 2>&1 | tail -20 | sed 's/^/  /'
+        fi
+    else
+        echo -e "  ${OK}  System up to date"
+    fi
+    pause
+}
+
+_maint_disk() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ DISK AUDIT${NC}"
+        echo ""
+        local disk_used disk_total disk_free disk_pct
+        read -r disk_total disk_used disk_pct < <(df -BG / | awk 'NR==2{gsub(/G/,"",$2); gsub(/G/,"",$3); gsub(/%/,"",$5); print $2,$3,$5}')
+        disk_free=$((disk_total - disk_used))
+        local bar_filled=$((disk_pct / 5)) bar_empty=$((20 - disk_pct / 5))
+        local bar_col=$BGRN
+        [[ "$disk_pct" -gt 60 ]] && bar_col=$BYEL
+        [[ "$disk_pct" -gt 80 ]] && bar_col=$BRED
+        printf "  %b" "${BOLD}  ${disk_used}GB used / ${disk_total}GB  (${disk_free}GB free · ${disk_pct}%%)${NC}\n"
+        printf "  [%b" "$bar_col"
+        printf '█%.0s' $(seq 1 $bar_filled)
+        printf '%b' "${NC}"
+        printf '░%.0s' $(seq 1 $bar_empty)
+        printf "]  %d%%\n\n" "$disk_pct"
+
+        local ai_lms ai_ollama apt_cache journal_sz
+        ai_lms=$(du -sh "${HOME}/.lmstudio/models" 2>/dev/null | cut -f1 || echo "0")
+        ai_ollama=$(du -sh "${HOME}/.ollama/models" 2>/dev/null | cut -f1 || echo "0")
+        apt_cache=$(du -sh /var/cache/apt 2>/dev/null | cut -f1 || echo "?")
+        journal_sz=$(du -sh /var/log/journal 2>/dev/null | cut -f1 || echo "?")
+        printf "  %-30s  %s\n" "LM Studio models:" "$ai_lms"
+        printf "  %-30s  %s\n" "Ollama models:" "$ai_ollama"
+        printf "  %-30s  %s\n" "APT cache:" "$apt_cache"
+        printf "  %-30s  %s\n" "Journal logs:" "$journal_sz"
+        echo ""
+        echo "   a)  Clean APT cache"
+        echo "   b)  Trim journal to 200MB"
+        echo "   c)  Remove disabled snap revisions"
+        echo "   d)  docker system prune"
+        echo "   A)  Run all safe cleanups"
+        echo "   r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            a) sudo apt clean && sudo apt autoremove -y 2>/dev/null | tail -5 | sed 's/^/  /'
+               echo -e "  ${OK}  APT cleaned"; pause ;;
+            b) sudo journalctl --vacuum-size=200M 2>/dev/null | sed 's/^/  /'
+               echo -e "  ${OK}  Journal trimmed"; pause ;;
+            c) snap list --all 2>/dev/null | awk '/disabled/{print $1,$3}' | while read -r sn rv; do sudo snap remove "$sn" --revision="$rv" 2>/dev/null; done
+               echo -e "  ${OK}  Done"; pause ;;
+            d) _docker_prune ;;
+            A) sudo apt clean && sudo apt autoremove -y >/dev/null 2>&1
+               sudo journalctl --vacuum-size=200M >/dev/null 2>&1
+               snap list --all 2>/dev/null | awk '/disabled/{print $1,$3}' | while read -r sn rv; do sudo snap remove "$sn" --revision="$rv" 2>/dev/null; done
+               echo -e "  ${OK}  All safe cleanups done"
+               df -h / | awk 'NR==2{printf "  Disk now: %s used / %s (%s free)\n",$3,$2,$4}'
+               pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+_maint_smart() {
+    header
+    echo -e "${BCYN}┄ DISK SMART HEALTH${NC}"
+    if ! command -v smartctl >/dev/null 2>&1; then echo "  sudo apt install smartmontools"; return; fi
+    for dev in $(lsblk -dno NAME | grep -Ev "loop|sr" | awk '{print "/dev/"$1}'); do
+        echo -e "  ${BOLD}${dev}${NC}"
+        sudo smartctl -H "$dev" 2>/dev/null \
+            | grep -E "SMART overall|result|Model|Capacity|Temperature|Power_On|Reallocated" \
+            | sed 's/^/    /'
+        echo ""
+    done
+}
+
+_maint_journal_errors() {
+    header
+    echo -e "${BCYN}┄ JOURNAL ERRORS (last 24h)${NC}"
+    sudo journalctl -p err --since "24 hours ago" 2>/dev/null | grep -v "^--" | tail -60 | sed 's/^/  /'
+}
+
+_maint_journal_trim() {
+    header
+    echo -e "${BCYN}┄ JOURNAL VACUUM${NC}"
+    sudo journalctl --vacuum-size=200M 2>/dev/null | sed 's/^/  /'
+    echo -e "  ${OK}  Done"
+    pause
+}
+
+# ──────────────────────────────────────────────────────────
+#  MODULE 8: PROJECTS
+# ──────────────────────────────────────────────────────────
+
+mod_projects() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ PROJECTS  (${ZMENU_PROJECTS_DIR}) ─────────────────────${NC}"
+        echo ""
+        local -a proj_paths=()
+        if [[ -d "$ZMENU_PROJECTS_DIR" ]]; then
+            while IFS= read -r -d '' p; do proj_paths+=("$p")
+            done < <(find "$ZMENU_PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z 2>/dev/null || true)
+        fi
+        local i=1
+        for p in "${proj_paths[@]}"; do
+            local pn; pn=$(basename "$p")
+            local badges=""
+            [[ -f "${p}/AI.md" ]] && badges+="${BGRN}[md]${NC}" || badges+="${DIM}[no md]${NC}"
+            [[ -f "${p}/.config/ai/settings.json" ]] && badges+=" ${BGRN}[secured]${NC}"
+            if [[ -d "${p}/.git" ]]; then
+                local br; br=$(git -C "$p" branch --show-current 2>/dev/null || echo "?")
+                local dirty=""
+                git -C "$p" diff --quiet 2>/dev/null || dirty=" ${BYEL}*${NC}"
+                badges+=" ${BCYN}[${br}${dirty}]${NC}"
+            fi
+            printf "   %d)  ${BOLD}%-20s${NC}  %b\n" "$i" "$pn" "$badges"
+            ((i++))
+        done
+        echo ""
+        echo "   n)  New project"
+        echo "   E)  Export    r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            n|N) _proj_new ;;
+            E) export_report "Projects"; pause ;;
+            r|R) break ;;
+            *)
+                if [[ "$ch" =~ ^[0-9]+$ ]] && [[ "$ch" -ge 1 ]] && [[ "$ch" -le ${#proj_paths[@]} ]]; then
+                    _proj_open "${proj_paths[$((ch-1))]}"
+                else
+                    echo -e "${RED}  Invalid.${NC}"; sleep 1
+                fi ;;
+        esac
+    done
+}
+
+_proj_open() {
+    local path="$1"
+    local name; name=$(basename "$path")
+    while true; do
+        header
+        echo -e "${BCYN}┄ PROJECT: ${name}${NC}"
+        echo ""
+        [[ -d "${path}/.git" ]] && {
+            echo -e "${BCYN}┄ GIT${NC}"
+            git -C "$path" status --short 2>/dev/null | head -10 | sed 's/^/  /'
+            echo ""
+            git -C "$path" log --oneline -5 2>/dev/null | sed 's/^/  /'
+            echo ""
+        }
+        [[ -f "${path}/AI.md" ]] && echo -e "  ${OK}  AI.md present" || echo -e "  ${WARN}  No AI.md"
+        [[ -f "${path}/.config/ai/settings.json" ]] && echo -e "  ${OK}  settings.json present" || echo -e "  ${WARN}  No settings.json"
+        echo ""
+        echo "   a)  Open terminal here"
+        echo "   b)  Launch AI session"
+        echo "   c)  Edit AI.md"
+        echo "   d)  Edit settings.json"
+        echo "   E)  Export    r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            a) if command -v gnome-terminal >/dev/null 2>&1; then gnome-terminal --working-directory="$path" &>/dev/null &
+               else echo "  cd ${path}"; fi ;;
+            b) cc_launch "Project: ${name}" "Working on project at ${path}. Read AI.md if present." "$path"; pause ;;
+            c) ${ZMENU_PREFERRED_EDITOR} "${path}/AI.md" ;;
+            d) mkdir -p "${path}/.config/ai"; ${ZMENU_PREFERRED_EDITOR} "${path}/.config/ai/settings.json" ;;
+            E) export_report "Project: ${name}"; pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+_proj_new() {
+    header
+    echo -e "${BCYN}┄ NEW PROJECT${NC}"
+    echo ""
+    read -rp "  Project name: " raw
+    [[ -z "$raw" ]] && return
+    local name; name=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+    local path="${ZMENU_PROJECTS_DIR}/${name}"
+    if [[ -d "$path" ]]; then echo -e "  ${WARN}  Already exists: ${path}"; pause; return; fi
+    mkdir -p "${path}/.config/ai"
+    cat > "${path}/AI.md" << EOF
+# ${name}
+> Created: $(date '+%B %Y')
+
+## What to Build
+
+## Stack
+$(uname -o) · $(uname -r) · ${D_CPU_MODEL}
+Ollama (${ZMENU_AI_MODEL}) · Docker
+EOF
+    cat > "${path}/.config/ai/settings.json" << 'EOF'
+{
+  "permissions": {
+    "allow": ["Bash:*"],
+    "deny": [
+      "Bash:rm -rf /", "Bash:sudo rm -rf*",
+      "Bash:cat ~/.ssh/*", "Edit:~/.ssh/*"
+    ]
+  }
+}
+EOF
+    cd "$path" && git init -q && echo ".env" > .gitignore \
+        && git add . -q && git commit -q -m "chore: init" && cd - >/dev/null
+    echo -e "  ${OK}  Created: ${path}"
+    sleep 1
+    _proj_open "$path"
+}
+
+# ──────────────────────────────────────────────────────────
+#  SETTINGS (merged from old Manage Z-Menu + AI Inspector)
+# ──────────────────────────────────────────────────────────
+
+mod_settings() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ SETTINGS ─────────────────────────────────────────────${NC}"
+        echo ""
+        echo "  Version:  ${ZMENU_VERSION}"
+        echo "  Source:   ${ZMENU_SELF}"
+        echo "  Install:  ${ZMENU_INSTALL_PATH}"
+        echo "  Config:   ${ZMENU_CONFIG_FILE}"
+        echo "  Model:    ${ZMENU_AI_MODEL}"
+        echo "  Context:  ${ZMENU_AI_CONTEXT_LENGTH} tokens"
+        echo ""
+
+        local inst_ver
+        inst_ver=$(grep 'ZMENU_VERSION=' "$ZMENU_INSTALL_PATH" 2>/dev/null | head -1 | cut -d'"' -f2 || echo "not installed")
+        [[ -z "$inst_ver" ]] && inst_ver="not installed"
+        if [[ "$inst_ver" == "$ZMENU_VERSION" ]]; then
+            echo -e "  Installed: ${BGRN}✓ ${inst_ver} matches${NC}"
+        elif [[ "$ZMENU_SELF" == "$ZMENU_INSTALL_PATH" ]]; then
+            echo -e "  Installed: ${BGRN}✓ running from install path${NC}"
+        else
+            echo -e "  Installed: ${BYEL}${inst_ver} (source is ${ZMENU_VERSION})${NC}"
+        fi
+
+        local sudoers_ok=false
+        sudo -n systemctl status ollama >/dev/null 2>&1 && sudoers_ok=true
+        $sudoers_ok && echo -e "  Ollama sudo: ${BGRN}✓ passwordless${NC}" || echo -e "  Ollama sudo: ${BYEL}requires password${NC}"
+        echo ""
+
+        echo -e "  ${BOLD}Z-Menu${NC}"
+        echo "   a)  Reinstall from source"
+        echo "   b)  Edit source"
+        echo "   c)  Edit config"
+        echo "   d)  Check environment vars"
+        echo "   e)  Re-run discovery"
+        echo "   f)  Setup passwordless Ollama"
+        echo ""
+        echo -e "  ${BOLD}AI Inspector${NC}"
+        echo "   g)  Global settings.json"
+        echo "   h)  Global AI.md"
+        echo "   i)  Skills viewer/editor"
+        echo "   j)  MCP servers"
+        echo "   k)  Project inspector"
+        echo ""
+        echo "   E)  Export    C)  ✦ Ask AI    r)  Back"
+        echo ""
+        read -rp "  Selection: " ch
+        case $ch in
+            a) _mgmt_reinstall; pause ;;
+            b) set +e; ${ZMENU_PREFERRED_EDITOR} "$ZMENU_SELF"; set -e ;;
+            c) cfg_edit ;;
+            d) _mgmt_envcheck; pause ;;
+            e) echo "  Re-running discovery..."; discover; echo -e "  ${OK}  Done"; pause ;;
+            f) _mgmt_sudoers_ollama; pause ;;
+            g) _cc_global_settings ;;
+            h) _cc_global_md ;;
+            i) _cc_skills ;;
+            j) _cc_mcps ;;
+            k) _cc_project_inspector ;;
+            E) export_report "Settings"; pause ;;
+            C) cc_launch "Z-Menu Developer" \
+                "You are the Z-Menu developer. Read the source at ${ZMENU_SELF}. Suggest improvements or write new modules."; pause ;;
+            r|R) break ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+_mgmt_reinstall() {
+    if [[ "$ZMENU_SELF" == "$ZMENU_INSTALL_PATH" ]]; then
+        echo -e "  ${WARN}  Source and install are the same"; return
+    fi
+    sudo cp "$ZMENU_SELF" "$ZMENU_INSTALL_PATH" && sudo chmod +x "$ZMENU_INSTALL_PATH" \
+        && echo -e "  ${OK}  Installed to ${ZMENU_INSTALL_PATH}" \
+        || echo -e "  ${FAIL}  Failed"
+}
+
+_mgmt_envcheck() {
+    header
+    echo -e "${BCYN}┄ ENVIRONMENT VARIABLES${NC}"
+    echo ""
+    local hsa_expected=""
+    if [[ -n "$D_GPU_GFX" ]]; then
+        local gfx_num="${D_GPU_GFX#gfx}"
+        [[ ${#gfx_num} -eq 4 ]] && hsa_expected="${gfx_num:0:2}.${gfx_num:2:1}.${gfx_num:3:1}" || hsa_expected="${gfx_num}"
+    fi
+    _env_check "HSA_OVERRIDE_GFX_VERSION" "${hsa_expected:-unknown}" "ROCm GPU hint (derived from ${D_GPU_GFX:-unknown})"
+    _env_check "DOCKER_HOST" "unix:///run/docker.sock" "Docker socket"
+}
+
+_env_check() {
+    local var="$1" expected="$2" desc="$3"
+    local cur="${!var:-NOT SET}"
+    printf "\n  ${BOLD}%s${NC}\n  %s\n" "$var" "$desc"
+    if [[ "$cur" == "NOT SET" ]]; then
+        printf "  ${BRED}NOT SET${NC}  →  echo 'export %s=%s' >> ~/.bashrc\n" "$var" "$expected"
+    elif [[ "$cur" == "$expected" ]]; then
+        printf "  ${BGRN}✓  %s${NC}\n" "$cur"
+    else
+        printf "  ${BYEL}%s  (expected: %s)${NC}\n" "$cur" "$expected"
+    fi
+}
+
+_mgmt_sudoers_ollama() {
+    header
+    echo -e "${BCYN}┄ PASSWORDLESS OLLAMA CONTROL${NC}"
+    echo ""
+    if sudo -n systemctl status ollama >/dev/null 2>&1; then
+        echo -e "  ${OK}  Already configured"
+        cat /etc/sudoers.d/zmenu-ollama 2>/dev/null | sed 's/^/  /' || true
+        return
+    fi
+    echo "  Creates sudoers rule for: systemctl stop|start|restart|status ollama"
+    echo ""
+    if ! confirm "Set up passwordless Ollama control?"; then return; fi
+    local user; user=$(whoami)
+    local rule="${user} ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop ollama, /usr/bin/systemctl start ollama, /usr/bin/systemctl restart ollama, /usr/bin/systemctl status ollama"
+    if echo "$rule" | sudo tee /etc/sudoers.d/zmenu-ollama >/dev/null 2>&1 \
+        && sudo chmod 0440 /etc/sudoers.d/zmenu-ollama \
+        && sudo visudo -c -f /etc/sudoers.d/zmenu-ollama >/dev/null 2>&1; then
+        echo -e "  ${OK}  Sudoers rule installed"
+    else
+        sudo rm -f /etc/sudoers.d/zmenu-ollama 2>/dev/null
+        echo -e "  ${FAIL}  Failed"
+    fi
+}
+
+# ── AI Inspector functions ─────────────────────────────────
+
+_cc_global_settings() {
+    header
+    echo -e "${BCYN}┄ GLOBAL SETTINGS  (~/.config/ai/settings.json)${NC}"
+    echo ""
+    local f="${HOME}/.config/ai/settings.json"
+    if [[ -f "$f" ]]; then
+        echo -e "  ${OK}  File present"
+        echo ""; cat "$f" | sed 's/^/  /'
+    else
+        echo -e "  ${WARN}  Not found"
+    fi
+    echo ""
+    echo "   e)  Edit    r)  Back"
+    read -rp "  Selection: " ch
+    [[ "$ch" =~ ^[eE]$ ]] && { mkdir -p "${HOME}/.config/ai"; ${ZMENU_PREFERRED_EDITOR} "$f"; }
+}
+
+_cc_global_md() {
+    header
+    echo -e "${BCYN}┄ GLOBAL AI.md  (~/.config/ai/AI.md)${NC}"
+    echo ""
+    local f="${HOME}/.config/ai/AI.md"
+    if [[ -f "$f" ]]; then
+        local lines; lines=$(wc -l < "$f")
+        echo -e "  ${OK}  Present  (${lines} lines)"
+        echo ""; cat "$f" | sed 's/^/  /' | head -40
+        [[ $lines -gt 40 ]] && echo "  ${DIM}... $((lines-40)) more lines${NC}"
+    else
+        echo -e "  ${WARN}  Not found"
+    fi
+    echo ""
+    echo "   e)  Edit    r)  Back"
+    read -rp "  Selection: " ch
+    [[ "$ch" =~ ^[eE]$ ]] && { mkdir -p "${HOME}/.config/ai"; ${ZMENU_PREFERRED_EDITOR} "$f"; }
+}
+
+_cc_skills() {
+    while true; do
+        header
+        echo -e "${BCYN}┄ SKILLS  (~/.config/ai/skills/)${NC}"
+        echo ""
+        local skills_dir="${HOME}/.config/ai/skills"
+        local -a skill_files=()
+        if [[ -d "$skills_dir" ]]; then
+            while IFS= read -r -d '' f; do skill_files+=("$f")
+            done < <(find "$skills_dir" -name "*.md" -print0 2>/dev/null | sort -z)
+        fi
+        if [[ ${#skill_files[@]} -eq 0 ]]; then
+            echo -e "  ${IDLE}  No skills yet."
+        else
+            local i=1
+            for f in "${skill_files[@]}"; do
+                printf "   %d)  ${BOLD}%-28s${NC}  ${DIM}%d lines${NC}\n" "$i" "$(basename "$f" .md)" "$(wc -l < "$f")"
+                ((i++))
+            done
+        fi
+        echo ""
+        echo "   n)  New skill    r)  Back"
+        echo ""
+        read -rp "  Select: " ch
+        case $ch in
+            r|R) break ;;
+            n|N) _cc_skill_new; continue ;;
+            *)
+                if [[ "$ch" =~ ^[0-9]+$ ]] && [[ "$ch" -ge 1 ]] && [[ "$ch" -le ${#skill_files[@]} ]]; then
+                    local sf="${skill_files[$((ch-1))]}"
+                    header; echo -e "${BCYN}┄ SKILL: $(basename "$sf" .md)${NC}"; echo ""
+                    cat "$sf" | sed 's/^/  /'
+                    echo ""
+                    echo "   e)  Edit    d)  Delete    r)  Back"
+                    read -rp "  Selection: " act
+                    case $act in
+                        e|E) ${ZMENU_PREFERRED_EDITOR} "$sf" ;;
+                        d|D) confirm "Delete?" && rm "$sf" && echo -e "  ${OK}  Deleted"; pause ;;
+                    esac
+                fi ;;
+        esac
+    done
+}
+
+_cc_skill_new() {
+    header
+    echo -e "${BCYN}┄ NEW SKILL${NC}"
+    echo ""
+    read -rp "  Skill name: " name
+    [[ -z "$name" ]] && return
+    local f="${HOME}/.config/ai/skills/${name}.md"
+    mkdir -p "${HOME}/.config/ai/skills"
+    if [[ ! -f "$f" ]]; then
+        printf "# %s\n\n## Purpose\nDescribe what this skill teaches your AI.\n\n## Rules\n- Rule 1\n\n## Examples\n" "$name" > "$f"
+    fi
+    ${ZMENU_PREFERRED_EDITOR} "$f"
+}
+
+_cc_mcps() {
+    header
+    echo -e "${BCYN}┄ MCP SERVERS${NC}"
+    echo ""
+    local settings="${HOME}/.config/ai/settings.json"
+    if [[ ! -f "$settings" ]]; then
+        echo -e "  ${WARN}  No settings.json"
+        echo "   a)  Add MCP server    r)  Back"
+        read -rp "  Selection: " ch
+        [[ "$ch" =~ ^[aA]$ ]] && _cc_mcp_add
+        return
+    fi
+    python3 - "$settings" << 'PYEOF'
+import json, sys
+f = sys.argv[1]
+try:
+    d = json.load(open(f))
+    servers = d.get('mcpServers', {})
+    if not servers: print("  No MCP servers registered.")
+    else:
+        print(f"  {len(servers)} server(s):\n")
+        for name, cfg in servers.items():
+            t = cfg.get('transport', cfg.get('type', '?'))
+            u = cfg.get('url', cfg.get('command', ''))
+            print(f"    {name}  ({t})  {u}")
+except Exception as e: print(f"  Error: {e}")
+PYEOF
+    echo ""
+    echo "   a)  Add    e)  Edit settings.json    r)  Back"
+    read -rp "  Selection: " ch
+    case $ch in a|A) _cc_mcp_add ;; e|E) ${ZMENU_PREFERRED_EDITOR} "$settings" ;; esac
+}
+
+_cc_mcp_add() {
+    header
+    echo -e "${BCYN}┄ ADD MCP SERVER${NC}"
+    echo ""
+    read -rp "  Server name: " mcp_name; [[ -z "$mcp_name" ]] && return
+    read -rp "  URL: " mcp_url; [[ -z "$mcp_url" ]] && return
+    read -rp "  Transport [sse/http/stdio] (default: sse): " mcp_transport
+    mcp_transport="${mcp_transport:-sse}"
+    local settings="${HOME}/.config/ai/settings.json"
+    python3 - "$settings" "$mcp_name" "$mcp_transport" "$mcp_url" << 'PYEOF'
+import json, sys
+f, name, transport, url = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try: d = json.load(open(f))
+except: d = {}
+d.setdefault("mcpServers", {})[name] = {"transport": transport, "url": url}
+json.dump(d, open(f, "w"), indent=2)
+print(f"  Added: {name}")
+PYEOF
+    pause
+}
+
+_cc_project_inspector() {
+    header
+    echo -e "${BCYN}┄ PROJECT AI INSPECTOR${NC}"
+    echo ""
+    echo -e "  ${DIM}[md]=AI.md  [set]=settings  [sk]=skills  [mcp]=MCP  [git]=branch${NC}"
+    echo ""
+    local -a proj_paths=()
+    if [[ -d "$ZMENU_PROJECTS_DIR" ]]; then
+        while IFS= read -r -d '' p; do proj_paths+=("$p")
+        done < <(find "$ZMENU_PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z 2>/dev/null || true)
+    fi
+    if [[ ${#proj_paths[@]} -eq 0 ]]; then echo "  No projects"; pause; return; fi
+    local i=1
+    for p in "${proj_paths[@]}"; do
+        local pn; pn=$(basename "$p")
+        local badges=""
+        [[ -f "${p}/AI.md" ]] && badges+="${BGRN}[md]${NC} " || badges+="${BRED}[no md]${NC} "
+        [[ -f "${p}/.config/ai/settings.json" ]] && badges+="${BGRN}[set]${NC} " || badges+="${BYEL}[no set]${NC} "
+        local sk=0
+        [[ -d "${p}/.config/ai/skills" ]] && sk=$(find "${p}/.config/ai/skills" -name "*.md" 2>/dev/null | wc -l)
+        [[ $sk -gt 0 ]] && badges+="${BCYN}[${sk}sk]${NC} "
+        if [[ -d "${p}/.git" ]]; then
+            local br; br=$(git -C "$p" branch --show-current 2>/dev/null || echo "?")
+            badges+="${DIM}[${br}]${NC}"
+        fi
+        printf "   %d)  ${BOLD}%-22s${NC}  %b\n" "$i" "$pn" "$badges"
+        ((i++))
+    done
+    echo ""
+    echo "   r)  Back"
+    read -rp "  Select: " ch
+    case $ch in
+        r|R) return ;;
+        *)
+            if [[ "$ch" =~ ^[0-9]+$ ]] && [[ "$ch" -ge 1 ]] && [[ "$ch" -le ${#proj_paths[@]} ]]; then
+                _cc_proj_detail "${proj_paths[$((ch-1))]}"
+            fi ;;
+    esac
+}
+
+_cc_proj_detail() {
+    local path="$1"
+    local name; name=$(basename "$path")
+    header
+    echo -e "${BCYN}┄ PROJECT: ${name}${NC}"
+    echo ""
+    echo -e "${BOLD}  AI.md${NC}"
+    if [[ -f "${path}/AI.md" ]]; then
+        echo -e "  ${OK}  Present  ($(wc -l < "${path}/AI.md") lines)"
+        head -25 "${path}/AI.md" | sed 's/^/    /'
+    else echo -e "  ${WARN}  Missing"; fi
+    echo ""
+    echo -e "${BOLD}  settings.json${NC}"
+    if [[ -f "${path}/.config/ai/settings.json" ]]; then
+        echo -e "  ${OK}  Present"
+        cat "${path}/.config/ai/settings.json" | sed 's/^/    /'
+    else echo -e "  ${WARN}  Missing"; fi
+    echo ""
+    echo -e "${BOLD}  Skills${NC}"
+    if [[ -d "${path}/.config/ai/skills" ]]; then
+        find "${path}/.config/ai/skills" -name "*.md" 2>/dev/null | while read -r sf; do
+            echo -e "    ${BGRN}●${NC}  $(basename "$sf" .md)"
+        done
+    else echo -e "  ${IDLE}  None"; fi
+    echo ""
+    echo "   e)  Edit AI.md    s)  Edit settings.json    r)  Back"
+    read -rp "  Selection: " ch
+    case $ch in
+        e|E) ${ZMENU_PREFERRED_EDITOR} "${path}/AI.md" ;;
+        s|S) mkdir -p "${path}/.config/ai"; ${ZMENU_PREFERRED_EDITOR} "${path}/.config/ai/settings.json" ;;
+    esac
+}
+
+# ============================================================
+#  SECTION 7 — MAIN MENU
+# ============================================================
+
+main_menu() {
+    while true; do
+        header
+        dashboard
+        echo -e "  ${BOLD}${BBLU}┄ MENU ─────────────────────────────────────────────────${NC}"
+        echo ""
+        echo "   1)  Dashboard               (refresh status above)"
+        echo "   2)  Find Problems            (full bottleneck sweep)"
+        echo "   3)  AI Engine                (Ollama · models · Open WebUI)"
+        echo "   4)  Apps & Services          (Docker containers · start/stop)"
+        echo "   5)  Hardware                 (CPU · GPU · NPU · power · thermals)"
+        echo "   6)  Security & Privacy       (ports · firewall · telemetry)"
+        echo "   7)  Maintenance              (updates · disk · SMART · journal)"
+        echo "   8)  Projects                 (open · create · AI sessions)"
+        echo ""
+        echo "   s)  Settings                 (zmenu config · AI inspector · env)"
+        echo "   E)  Export full report"
+        echo "   q)  Exit"
+        echo ""
+        read -rp "  $(printf '%b' "${BOLD}Selection:${NC} ")" choice
+        case $choice in
+            1) discover ;;
+            2) mod_find_problems ;;
+            3) mod_ai_engine ;;
+            4) mod_apps_services ;;
+            5) mod_hardware ;;
+            6) mod_security ;;
+            7) mod_maintenance ;;
+            8) mod_projects ;;
+            s|S) mod_settings ;;
+            E) export_report "Full System"; pause ;;
+            q|Q) printf '\n%b  Sovereign. Signing off.%b\n\n' "${BGRN}" "${NC}"; exit 0 ;;
+            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ============================================================
+#  SECTION 8 — ENTRYPOINT
+# ============================================================
+
+_bootstrap() {
+    cfg_load
+    echo -e "${DIM}  Discovering system...${NC}"
+    discover
+    printf '\033[1A\033[2K'
+}
+
+case "${1:-}" in
+    --run|-r)
+        if [[ -n "${2:-}" ]]; then
+            export ZMENU_HEADLESS=1
+            _bootstrap
+            "$2"
+            exit $?
+        else
+            printf '%bError: --run requires a function name%b\n' "$BRED" "$NC" >&2
+            exit 1
+        fi
+        ;;
+    --context)
+        _bootstrap
+        context_generate
+        cat "$ZMENU_CONTEXT_FILE"
+        exit 0
+        ;;
+    --export)
+        _bootstrap
+        export_report "CLI Export"
+        cat "$ZMENU_REPORT_FILE"
+        exit 0
+        ;;
+    --help|-h)
+        echo "Usage: zmenu [--run <function>] [--context] [--export] [--help]"
+        echo "  --run <fn>    Execute a module function headlessly"
+        echo "  --context     Dump live system context to stdout"
+        echo "  --export      Generate markdown report to ~/zmenu-report.md"
+        exit 0
+        ;;
+    "")
+        _bootstrap
+        main_menu
+        ;;
+    *)
+        printf '%bUnknown argument: %s%b\n' "$BRED" "$1" "$NC" >&2
+        exit 1
+        ;;
+esac
