@@ -186,19 +186,20 @@ D_SERVICES=()
 D_OPEN_PORTS=()
 
 discover() {
-    _disc_cpu
-    _disc_memory
-    _disc_ollama
-    _disc_zenny
-    _disc_lms
-    _disc_ai_tool
-    _disc_claude
-    _disc_docker
-    _disc_gpu
-    _disc_npu
-    _disc_services
-    _disc_ports
-    _sel_ai_backend
+    # Discovery must never abort startup; keep failures isolated per probe.
+    _disc_cpu || true
+    _disc_memory || true
+    _disc_ollama || true
+    _disc_zenny || true
+    _disc_lms || true
+    _disc_ai_tool || true
+    _disc_claude || true
+    _disc_docker || true
+    _disc_gpu || true
+    _disc_npu || true
+    _disc_services || true
+    _disc_ports || true
+    _sel_ai_backend || true
     ( _wiki_full_refresh ) 2>/dev/null || true
 }
 
@@ -334,15 +335,11 @@ _disc_ai_tool() {
 }
 
 _disc_claude() {
-    D_CLAUDE_BIN=$(command -v claude 2>/dev/null || echo "")
-    [[ -z "$D_CLAUDE_BIN" ]] && return
-    D_CLAUDE_VER=$(claude --version 2>/dev/null | grep -o '[0-9]\+\.[0-9]\+\.[0-9]*' | head -1 || echo "?")
-    # Detect if we're running inside an active Claude Code session
-    # Claude Code sets CLAUDE_CODE_ENTRYPOINT or runs node processes with claude in path
-    if [[ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ]] || \
-       pgrep -f "node.*\.nvm.*claude" >/dev/null 2>&1; then
-        D_CLAUDE_SESSION=true
-    fi
+    # Hard-disabled to avoid any startup risk from missing/removed claude tooling.
+    D_CLAUDE_BIN=""
+    D_CLAUDE_VER=""
+    D_CLAUDE_SESSION=false
+    return 0
 }
 
 # ── Docker ─────────────────────────────────────────────────
