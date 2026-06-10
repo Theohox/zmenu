@@ -25,7 +25,7 @@ confirm() {
 submenu_footer() {
     echo ""
     echo -e "  ${DIM}─────────────────────────────────────────${NC}"
-    echo -e "  ${DIM}[Enter]=back    [r]=refresh    [q]=quit zmenu    [?]=help${NC}"
+    echo -e "  ${DIM}[Enter]=back    [r]=refresh    [q]=quit zmenu${NC}"
 }
 
 # ── Session logging ────────────────────────────────────────
@@ -127,6 +127,16 @@ dashboard() {
     _disc_hermes || true
     _disc_process_groups || true
     _history_load_trend 5
+
+    # Load sparkline data
+    local _spark_gpu="" _spark_ram="" _spark_load=""
+    local _pts="${ZMENU_SPARKLINE_POINTS:-30}"
+    _sparkline_read "gpu_temp" "$_pts"
+    [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_gpu=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
+    _sparkline_read "ram_used_mb" "$_pts"
+    [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_ram=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
+    _sparkline_read "load1" "$_pts"
+    [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_load=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
 
     # ── AI Engine (computed early, rendered last) ─────────
     local _zenny _zenny_info
@@ -275,11 +285,13 @@ except: pass
     # Hardware — primary for a discovery system
     echo -e "  ${BOLD}Hardware${NC}"
     echo -e "    GPU       ${_gpu}  ${_gpu_info}"
+    [[ -n "$_spark_gpu" ]] && echo -e "    ${DIM}      ${_spark_gpu}${NC}"
     echo -e "    NPU       ${_npu}  ${_npu_info}"
     echo -e "    Thermals  ${_therm}  CPU: ${cpu_temp:-?}°C  GPU: ${D_GPU_TEMP:-?}°C"
     local _load_trend=""
     [[ -n "${D_HIST_LOAD1:-}" ]] && _load_trend=$(_history_trend_str "$load1" "$D_HIST_LOAD1" "")
     echo -e "    Load      ${_load}  $(awk '{printf "%s %s %s",$1,$2,$3}' /proc/loadavg)  ${_load_trend} ${DIM}(${D_CPU_CORES} threads)${NC}"
+    [[ -n "$_spark_load" ]] && echo -e "    ${DIM}      ${_spark_load}${NC}"
     if [[ "$_load" == "$FAIL" ]]; then
         echo -e "    ${BRED}→ CRITICAL: System overloaded! Use KILL MODE (option 1)${NC}"
     elif [[ "$_load" == "$WARN" ]]; then
@@ -291,6 +303,7 @@ except: pass
     local _ram_trend=""
     [[ -n "${D_HIST_RAM_USED:-}" ]] && _ram_trend=$(_history_trend_str "${D_MEM_USED_MB:-0}" "$D_HIST_RAM_USED" "MB")
     echo -e "  ${BOLD}Memory Pool${NC}    ${_mem}  ${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB used ${_ram_trend} ·  ${D_MEM_AVAIL_MB} MB available"
+    [[ -n "$_spark_ram" ]] && echo -e "    ${DIM}      ${_spark_ram}${NC}"
     echo -e "    ${_swap}  Swap: ${D_SWAP_USED_MB}/${D_SWAP_TOTAL_MB} MB"
     if [[ -n "$mem_consumers" ]]; then
         echo -e "    ${DIM}Top consumers:${NC}"

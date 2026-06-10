@@ -70,13 +70,24 @@ _watch_alert() {
     fi
 }
 
+# Lightweight discovery for watch mode — only metrics needed for thresholds
+_watch_discover() {
+    _disc_memory || true
+    _disc_gpu || true
+    # GPU temp may be set by _disc_gpu; if not, try sensors fallback
+    if [[ -z "${D_GPU_TEMP:-}" ]] && command -v sensors >/dev/null 2>&1; then
+        D_GPU_TEMP=$(sensors 2>/dev/null | awk '/Tctl|Tdie/{gsub(/[+°C]/,"",$2); print $2; exit}' || echo "0")
+    fi
+    : "${D_GPU_TEMP:=0}"
+}
+
 _watch_mode() {
     cfg_load
     echo -e "${DIM}  zmenu watch mode — checking every ${ZMENU_WATCH_INTERVAL:-30}s${NC}"
     echo "  Press Ctrl+C to stop"
     echo ""
     while true; do
-        discover >/dev/null 2>&1 || true
+        _watch_discover
         local alerts
         alerts=$(_watch_check_thresholds)
         if [[ -n "$alerts" ]]; then

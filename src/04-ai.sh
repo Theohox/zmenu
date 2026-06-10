@@ -61,6 +61,7 @@ _build_context_prompt() {
 
 # Generate structured JSON context for deterministic AI parsing.
 # Included in the system prompt as a fenced JSON block.
+# All dynamic data passed via env vars to avoid shell escaping issues.
 _build_context_json() {
     local _containers="[]"
     if [[ ${#D_CONTAINERS[@]} -gt 0 ]]; then
@@ -79,32 +80,45 @@ print(json.dumps(arr))
     if [[ ${#D_SERVICES[@]} -gt 0 ]]; then
         _services=$(printf '%s\n' "${D_SERVICES[@]}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' 2>/dev/null || echo "[]")
     fi
+    local _zenny_models
+    _zenny_models=$(IFS=,; echo "${D_ZENNY_KEYS[*]}")
+    local _load1; _load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo "0")
+    CTX_CPU_MODEL="${D_CPU_MODEL:-unknown}" \
+    CTX_CPU_CORES="${D_CPU_CORES:-0}" \
+    CTX_CPU_GOV="${D_CPU_GOVERNOR:-unknown}" \
+    CTX_MEM_TOTAL="${D_MEM_TOTAL_MB:-0}" \
+    CTX_MEM_USED="${D_MEM_USED_MB:-0}" \
+    CTX_SWAP_USED="${D_SWAP_USED_MB:-0}" \
+    CTX_GPU_DRIVER="${D_GPU_DRIVER:-none}" \
+    CTX_GPU_GFX="${D_GPU_GFX:-unknown}" \
+    CTX_GPU_TEMP="${D_GPU_TEMP:-0}" \
+    CTX_GPU_USE="${D_GPU_USE:-0}" \
+    CTX_NPU_DRIVER="${D_NPU_DRIVER:-none}" \
+    CTX_NPU_DEVICE="${D_NPU_DEVICE:-none}" \
+    CTX_LOAD1="$_load1" \
+    CTX_CONTAINERS="$_containers" \
+    CTX_SERVICES="$_services" \
+    CTX_ZENNY_RUNNING="${D_ZENNY_RUNNING:-false}" \
+    CTX_ZENNY_MODELS="$_zenny_models" \
+    CTX_OLLAMA_RUNNING="${D_OLLAMA_RUNNING:-false}" \
+    CTX_BACKEND="${AI_BACKEND_LABEL:-none}" \
+    CTX_AI_MODEL="${ZMENU_AI_MODEL:-auto}" \
     python3 -c '
-import json,sys
-args=sys.argv[1:]
-cpu_model,cpu_cores,cpu_gov,mem_total,mem_used,swap_used,gpu_driver,gpu_gfx,gpu_temp,gpu_use,npu_driver,npu_device,load1,containers_json,services_json,zenny_running,zenny_models,ollama_running,backend_label,ai_model=args
+import json,sys,os
 d={
-    "cpu":{"model":cpu_model,"cores":int(cpu_cores or 0),"governor":cpu_gov},
-    "ram":{"total_mb":int(mem_total or 0),"used_mb":int(mem_used or 0),"swap_used_mb":int(swap_used or 0)},
-    "gpu":{"driver":gpu_driver,"gfx":gpu_gfx,"temp_c":int(gpu_temp or 0),"util_pct":int(gpu_use or 0)},
-    "npu":{"driver":npu_driver,"device":npu_device},
-    "load":{"1min":float(load1 or 0)},
-    "docker":{"containers":json.loads(containers_json)},
-    "services":json.loads(services_json),
-    "zenny":{"running":zenny_running=="true","models":zenny_models.split(",") if zenny_models else []},
-    "ollama":{"running":ollama_running=="true"},
-    "ai_backend":{"label":backend_label,"model":ai_model}
+    "cpu":{"model":os.environ.get("CTX_CPU_MODEL",""),"cores":int(os.environ.get("CTX_CPU_CORES","0") or 0),"governor":os.environ.get("CTX_CPU_GOV","")},
+    "ram":{"total_mb":int(os.environ.get("CTX_MEM_TOTAL","0") or 0),"used_mb":int(os.environ.get("CTX_MEM_USED","0") or 0),"swap_used_mb":int(os.environ.get("CTX_SWAP_USED","0") or 0)},
+    "gpu":{"driver":os.environ.get("CTX_GPU_DRIVER",""),"gfx":os.environ.get("CTX_GPU_GFX",""),"temp_c":int(os.environ.get("CTX_GPU_TEMP","0") or 0),"util_pct":int(os.environ.get("CTX_GPU_USE","0") or 0)},
+    "npu":{"driver":os.environ.get("CTX_NPU_DRIVER",""),"device":os.environ.get("CTX_NPU_DEVICE","")},
+    "load":{"1min":float(os.environ.get("CTX_LOAD1","0") or 0)},
+    "docker":{"containers":json.loads(os.environ.get("CTX_CONTAINERS","[]"))},
+    "services":json.loads(os.environ.get("CTX_SERVICES","[]")),
+    "zenny":{"running":os.environ.get("CTX_ZENNY_RUNNING","")=="true","models":os.environ.get("CTX_ZENNY_MODELS","").split(",") if os.environ.get("CTX_ZENNY_MODELS","") else []},
+    "ollama":{"running":os.environ.get("CTX_OLLAMA_RUNNING","")=="true"},
+    "ai_backend":{"label":os.environ.get("CTX_BACKEND",""),"model":os.environ.get("CTX_AI_MODEL","")}
 }
 print(json.dumps(d,indent=2))
-' \
-    "${D_CPU_MODEL:-unknown}" "${D_CPU_CORES:-0}" "${D_CPU_GOVERNOR:-unknown}" \
-    "${D_MEM_TOTAL_MB:-0}" "${D_MEM_USED_MB:-0}" "${D_SWAP_USED_MB:-0}" \
-    "${D_GPU_DRIVER:-none}" "${D_GPU_GFX:-unknown}" "${D_GPU_TEMP:-0}" "${D_GPU_USE:-0}" \
-    "${D_NPU_DRIVER:-none}" "${D_NPU_DEVICE:-none}" "${load1:-0}" \
-    "$_containers" "$_services" \
-    "${D_ZENNY_RUNNING:-false}" "$(IFS=,; echo "${D_ZENNY_KEYS[*]}")" \
-    "${D_OLLAMA_RUNNING:-false}" "${AI_BACKEND_LABEL:-none}" "${ZMENU_AI_MODEL:-auto}" \
-    2>/dev/null || echo '{}'
+' 2>/dev/null || echo '{}'
 }
 
 # _cc_write_rules — writes context into opencode's rules file for the session

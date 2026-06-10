@@ -49,6 +49,10 @@ ZMENU_ALERT_GPU_TEMP=85
 ZMENU_ALERT_RAM_PERCENT=90
 ZMENU_ALERT_SWAP_MB=500
 ZMENU_ALERT_LOAD_MULTIPLIER=2
+
+# ── Dashboard Sparklines ───────────────────────────────────
+# Number of historical data points to show (default: 30 ≈ 15 min at 30s intervals)
+ZMENU_SPARKLINE_POINTS=30
 EOF
     echo -e "  ${BGRN}✓${NC}  Config created: ${ZMENU_CONFIG_FILE}"
 }

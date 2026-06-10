@@ -147,36 +147,97 @@ _history_load_trend() {
     local latest_file
     latest_file=$(ls -1 "$ZMENU_HISTORY_DIR"/metrics.*.jsonl 2>/dev/null | tail -1)
     [[ -z "$latest_file" ]] && return
-    local last_rec
-    last_rec=$(awk -v c="$cutoff" '
-        BEGIN{FS="\"t\":\""}
-        NF>1{
-            ts=$2; gsub(/\".*/,"",ts)
-            cmd="date -d \"" ts "\" +%s"; cmd | getline epoch; close(cmd)
-            if(epoch>=c){print; exit}
-        }
-    ' "$latest_file" 2>/dev/null)
-    [[ -z "$last_rec" ]] && return
-    # Export deltas
-    D_HIST_GPU_TEMP=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_temp',0))" 2>/dev/null || echo "0")
-    D_HIST_GPU_USE=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_use',0))" 2>/dev/null || echo "0")
-    D_HIST_RAM_USED=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ram_used_mb',0))" 2>/dev/null || echo "0")
-    D_HIST_LOAD1=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('load1',0))" 2>/dev/null || echo "0")
+    # Pure Python: find first record with timestamp >= cutoff
+    local _json_out
+    _json_out=$(python3 -c '
+import json,sys,datetime
+cutoff=int(sys.argv[1]); hf=sys.argv[2]
+try:
+    with open(hf) as f:
+        for line in f:
+            d=json.loads(line)
+            ts=datetime.datetime.fromisoformat(d["t"].replace("Z","+00:00")).timestamp()
+            if ts>=cutoff:
+                print(json.dumps(d))
+                break
+except Exception:
+    pass
+' "$cutoff" "$latest_file" 2>/dev/null)
+    [[ -z "$_json_out" ]] && return
+    D_HIST_GPU_TEMP=$(echo "$_json_out" | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_temp',0))" 2>/dev/null || echo "0")
+    D_HIST_GPU_USE=$(echo "$_json_out"  | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_use',0))" 2>/dev/null || echo "0")
+    D_HIST_RAM_USED=$(echo "$_json_out" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ram_used_mb',0))" 2>/dev/null || echo "0")
+    D_HIST_LOAD1=$(echo "$_json_out" | python3 -c "import sys,json; print(json.load(sys.stdin).get('load1',0))" 2>/dev/null || echo "0")
 }
 
 _history_trend_str() {
     local current="$1" past="$2" label="${3:-}"
     local delta=0
+    # Pure bash integer math — strip decimals, subtract, round
     if [[ "$current" =~ ^[0-9]+(\.[0-9]+)?$ && "$past" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-        delta=$(echo "$current - $past" | bc -l 2>/dev/null || echo "0")
-        # Strip leading zero/decimal for clean integer display
-        delta=$(printf '%.0f' "$delta" 2>/dev/null || echo "0")
+        local c_int p_int
+        c_int=${current%%.*}
+        p_int=${past%%.*}
+        delta=$((c_int - p_int))
     fi
     if [[ "$delta" -gt 0 ]]; then
         echo "${DIM}▲(+${delta}${label})${NC}"
     elif [[ "$delta" -lt 0 ]]; then
         echo "${DIM}▼(${delta}${label})${NC}"
     fi
+}
+
+# ── Sparklines ─────────────────────────────────────────────
+# Read last N values of a given metric from today's JSONL history.
+# Usage: _sparkline_read <metric_key> <count>
+# Sets D_SPARKLINE_VALS as space-separated values, D_SPARKLINE_MAX.
+_sparkline_read() {
+    local metric="$1"
+    local count="${2:-30}"
+    D_SPARKLINE_VALS=""
+    D_SPARKLINE_MAX=1
+    local hf="$ZMENU_HISTORY_DIR/metrics.$(date +%Y%m%d).jsonl"
+    [[ -f "$hf" ]] || return
+    local _out
+    _out=$(python3 -c '
+import json,sys
+metric=sys.argv[1]; count=int(sys.argv[2]); hf=sys.argv[3]
+vals=[]
+try:
+    with open(hf) as f:
+        for line in f:
+            d=json.loads(line)
+            v=d.get(metric,0)
+            if isinstance(v,(int,float)):
+                vals.append(float(v))
+    vals=vals[-count:] if len(vals)>count else vals
+    if vals:
+        mx=max(vals)
+        print(" ".join(str(int(v)) for v in vals))
+        print(int(mx) if mx>=1 else 1)
+except Exception:
+    pass
+' "$metric" "$count" "$hf" 2>/dev/null)
+    [[ -z "$_out" ]] && return
+    D_SPARKLINE_MAX=$(echo "$_out" | tail -1)
+    D_SPARKLINE_VALS=$(echo "$_out" | head -1)
+}
+
+# Render space-separated values as ASCII sparkline.
+# Usage: _sparkline_render "1 3 5 7 9" <max>
+_sparkline_render() {
+    local vals="$1"
+    local max="${2:-1}"
+    [[ -z "$vals" ]] && return
+    [[ "$max" -lt 1 ]] && max=1
+    local bars=('▁' '▂' '▃' '▄' '▅' '▆' '▇' '█')
+    local v out=""
+    for v in $vals; do
+        local idx=$((v * 7 / max))
+        [[ "$idx" -gt 7 ]] && idx=7
+        out+="${bars[$idx]}"
+    done
+    echo "$out"
 }
 
 # ── CPU ────────────────────────────────────────────────────

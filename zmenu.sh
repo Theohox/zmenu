@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  —  Built 2026-06-10 19:00:54
+#  Z-MENU  —  Built 2026-06-10 19:30:25
 #  Auto-generated from src/*.sh — edit sources, not this file
 #  Build: ./build.sh
 # ============================================================
@@ -12,7 +12,7 @@
 
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  v5.13.0
+#  Z-MENU  v5.13.1
 #  Local Sovereign Dashboard
 #
 #  INSTALL:   ./build.sh && sudo cp zmenu.sh /usr/local/bin/zmenu
@@ -20,16 +20,14 @@
 #  HEADLESS:  zmenu --run <function_name>
 #  WATCH:     zmenu --watch   (background monitoring)
 #
-#  v5.13.0 — History, trends, search, watch mode:
-#    • Time-series metrics history → ~/.zmenu/history/metrics.YYYYMMDD.jsonl
-#    • Trend indicators ▲▼ on dashboard (5-min delta)
-#    • Session command logging → ~/.zmenu/history/commands.jsonl
-#    • Background watcher: zmenu --watch with threshold alerts + cooldown
-#    • Universal search (/) — processes, services, ports, wiki, history
-#    • Per-menu help (?) — context-sensitive key reference
-#    • Structured JSON context for AI + action history in prompts
-#    • Recently used menu items on dashboard
-#    • Configurable alert thresholds in ~/.zmenu/config
+#  v5.13.1 — Quality audit + sparklines:
+#    • Fixed _history_load_trend: replaced fragile awk+getline+date with Python
+#    • Fixed _history_trend_str: replaced bc dependency with pure bash math
+#    • Fixed _watch_mode: lightweight probes instead of heavy full discover()
+#    • Fixed _build_context_json: env-var pass (no shell escaping issues)
+#    • Removed false [?]=help promise from submenu_footer
+#    • ASCII sparklines on dashboard (GPU temp, RAM, load)
+#    • Configurable sparkline point count: ZMENU_SPARKLINE_POINTS
 #
 #  Architecture:
 #    1. Config       — ~/.zmenu/config (sourced, user-editable)
@@ -45,7 +43,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.13.0"
+readonly ZMENU_VERSION="5.13.1"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
@@ -151,6 +149,10 @@ ZMENU_ALERT_GPU_TEMP=85
 ZMENU_ALERT_RAM_PERCENT=90
 ZMENU_ALERT_SWAP_MB=500
 ZMENU_ALERT_LOAD_MULTIPLIER=2
+
+# ── Dashboard Sparklines ───────────────────────────────────
+# Number of historical data points to show (default: 30 ≈ 15 min at 30s intervals)
+ZMENU_SPARKLINE_POINTS=30
 EOF
     echo -e "  ${BGRN}✓${NC}  Config created: ${ZMENU_CONFIG_FILE}"
 }
@@ -333,36 +335,97 @@ _history_load_trend() {
     local latest_file
     latest_file=$(ls -1 "$ZMENU_HISTORY_DIR"/metrics.*.jsonl 2>/dev/null | tail -1)
     [[ -z "$latest_file" ]] && return
-    local last_rec
-    last_rec=$(awk -v c="$cutoff" '
-        BEGIN{FS="\"t\":\""}
-        NF>1{
-            ts=$2; gsub(/\".*/,"",ts)
-            cmd="date -d \"" ts "\" +%s"; cmd | getline epoch; close(cmd)
-            if(epoch>=c){print; exit}
-        }
-    ' "$latest_file" 2>/dev/null)
-    [[ -z "$last_rec" ]] && return
-    # Export deltas
-    D_HIST_GPU_TEMP=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_temp',0))" 2>/dev/null || echo "0")
-    D_HIST_GPU_USE=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_use',0))" 2>/dev/null || echo "0")
-    D_HIST_RAM_USED=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ram_used_mb',0))" 2>/dev/null || echo "0")
-    D_HIST_LOAD1=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('load1',0))" 2>/dev/null || echo "0")
+    # Pure Python: find first record with timestamp >= cutoff
+    local _json_out
+    _json_out=$(python3 -c '
+import json,sys,datetime
+cutoff=int(sys.argv[1]); hf=sys.argv[2]
+try:
+    with open(hf) as f:
+        for line in f:
+            d=json.loads(line)
+            ts=datetime.datetime.fromisoformat(d["t"].replace("Z","+00:00")).timestamp()
+            if ts>=cutoff:
+                print(json.dumps(d))
+                break
+except Exception:
+    pass
+' "$cutoff" "$latest_file" 2>/dev/null)
+    [[ -z "$_json_out" ]] && return
+    D_HIST_GPU_TEMP=$(echo "$_json_out" | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_temp',0))" 2>/dev/null || echo "0")
+    D_HIST_GPU_USE=$(echo "$_json_out"  | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_use',0))" 2>/dev/null || echo "0")
+    D_HIST_RAM_USED=$(echo "$_json_out" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ram_used_mb',0))" 2>/dev/null || echo "0")
+    D_HIST_LOAD1=$(echo "$_json_out" | python3 -c "import sys,json; print(json.load(sys.stdin).get('load1',0))" 2>/dev/null || echo "0")
 }
 
 _history_trend_str() {
     local current="$1" past="$2" label="${3:-}"
     local delta=0
+    # Pure bash integer math — strip decimals, subtract, round
     if [[ "$current" =~ ^[0-9]+(\.[0-9]+)?$ && "$past" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-        delta=$(echo "$current - $past" | bc -l 2>/dev/null || echo "0")
-        # Strip leading zero/decimal for clean integer display
-        delta=$(printf '%.0f' "$delta" 2>/dev/null || echo "0")
+        local c_int p_int
+        c_int=${current%%.*}
+        p_int=${past%%.*}
+        delta=$((c_int - p_int))
     fi
     if [[ "$delta" -gt 0 ]]; then
         echo "${DIM}▲(+${delta}${label})${NC}"
     elif [[ "$delta" -lt 0 ]]; then
         echo "${DIM}▼(${delta}${label})${NC}"
     fi
+}
+
+# ── Sparklines ─────────────────────────────────────────────
+# Read last N values of a given metric from today's JSONL history.
+# Usage: _sparkline_read <metric_key> <count>
+# Sets D_SPARKLINE_VALS as space-separated values, D_SPARKLINE_MAX.
+_sparkline_read() {
+    local metric="$1"
+    local count="${2:-30}"
+    D_SPARKLINE_VALS=""
+    D_SPARKLINE_MAX=1
+    local hf="$ZMENU_HISTORY_DIR/metrics.$(date +%Y%m%d).jsonl"
+    [[ -f "$hf" ]] || return
+    local _out
+    _out=$(python3 -c '
+import json,sys
+metric=sys.argv[1]; count=int(sys.argv[2]); hf=sys.argv[3]
+vals=[]
+try:
+    with open(hf) as f:
+        for line in f:
+            d=json.loads(line)
+            v=d.get(metric,0)
+            if isinstance(v,(int,float)):
+                vals.append(float(v))
+    vals=vals[-count:] if len(vals)>count else vals
+    if vals:
+        mx=max(vals)
+        print(" ".join(str(int(v)) for v in vals))
+        print(int(mx) if mx>=1 else 1)
+except Exception:
+    pass
+' "$metric" "$count" "$hf" 2>/dev/null)
+    [[ -z "$_out" ]] && return
+    D_SPARKLINE_MAX=$(echo "$_out" | tail -1)
+    D_SPARKLINE_VALS=$(echo "$_out" | head -1)
+}
+
+# Render space-separated values as ASCII sparkline.
+# Usage: _sparkline_render "1 3 5 7 9" <max>
+_sparkline_render() {
+    local vals="$1"
+    local max="${2:-1}"
+    [[ -z "$vals" ]] && return
+    [[ "$max" -lt 1 ]] && max=1
+    local bars=('▁' '▂' '▃' '▄' '▅' '▆' '▇' '█')
+    local v out=""
+    for v in $vals; do
+        local idx=$((v * 7 / max))
+        [[ "$idx" -gt 7 ]] && idx=7
+        out+="${bars[$idx]}"
+    done
+    echo "$out"
 }
 
 # ── CPU ────────────────────────────────────────────────────
@@ -1109,6 +1172,7 @@ _build_context_prompt() {
 
 # Generate structured JSON context for deterministic AI parsing.
 # Included in the system prompt as a fenced JSON block.
+# All dynamic data passed via env vars to avoid shell escaping issues.
 _build_context_json() {
     local _containers="[]"
     if [[ ${#D_CONTAINERS[@]} -gt 0 ]]; then
@@ -1127,32 +1191,45 @@ print(json.dumps(arr))
     if [[ ${#D_SERVICES[@]} -gt 0 ]]; then
         _services=$(printf '%s\n' "${D_SERVICES[@]}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' 2>/dev/null || echo "[]")
     fi
+    local _zenny_models
+    _zenny_models=$(IFS=,; echo "${D_ZENNY_KEYS[*]}")
+    local _load1; _load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo "0")
+    CTX_CPU_MODEL="${D_CPU_MODEL:-unknown}" \
+    CTX_CPU_CORES="${D_CPU_CORES:-0}" \
+    CTX_CPU_GOV="${D_CPU_GOVERNOR:-unknown}" \
+    CTX_MEM_TOTAL="${D_MEM_TOTAL_MB:-0}" \
+    CTX_MEM_USED="${D_MEM_USED_MB:-0}" \
+    CTX_SWAP_USED="${D_SWAP_USED_MB:-0}" \
+    CTX_GPU_DRIVER="${D_GPU_DRIVER:-none}" \
+    CTX_GPU_GFX="${D_GPU_GFX:-unknown}" \
+    CTX_GPU_TEMP="${D_GPU_TEMP:-0}" \
+    CTX_GPU_USE="${D_GPU_USE:-0}" \
+    CTX_NPU_DRIVER="${D_NPU_DRIVER:-none}" \
+    CTX_NPU_DEVICE="${D_NPU_DEVICE:-none}" \
+    CTX_LOAD1="$_load1" \
+    CTX_CONTAINERS="$_containers" \
+    CTX_SERVICES="$_services" \
+    CTX_ZENNY_RUNNING="${D_ZENNY_RUNNING:-false}" \
+    CTX_ZENNY_MODELS="$_zenny_models" \
+    CTX_OLLAMA_RUNNING="${D_OLLAMA_RUNNING:-false}" \
+    CTX_BACKEND="${AI_BACKEND_LABEL:-none}" \
+    CTX_AI_MODEL="${ZMENU_AI_MODEL:-auto}" \
     python3 -c '
-import json,sys
-args=sys.argv[1:]
-cpu_model,cpu_cores,cpu_gov,mem_total,mem_used,swap_used,gpu_driver,gpu_gfx,gpu_temp,gpu_use,npu_driver,npu_device,load1,containers_json,services_json,zenny_running,zenny_models,ollama_running,backend_label,ai_model=args
+import json,sys,os
 d={
-    "cpu":{"model":cpu_model,"cores":int(cpu_cores or 0),"governor":cpu_gov},
-    "ram":{"total_mb":int(mem_total or 0),"used_mb":int(mem_used or 0),"swap_used_mb":int(swap_used or 0)},
-    "gpu":{"driver":gpu_driver,"gfx":gpu_gfx,"temp_c":int(gpu_temp or 0),"util_pct":int(gpu_use or 0)},
-    "npu":{"driver":npu_driver,"device":npu_device},
-    "load":{"1min":float(load1 or 0)},
-    "docker":{"containers":json.loads(containers_json)},
-    "services":json.loads(services_json),
-    "zenny":{"running":zenny_running=="true","models":zenny_models.split(",") if zenny_models else []},
-    "ollama":{"running":ollama_running=="true"},
-    "ai_backend":{"label":backend_label,"model":ai_model}
+    "cpu":{"model":os.environ.get("CTX_CPU_MODEL",""),"cores":int(os.environ.get("CTX_CPU_CORES","0") or 0),"governor":os.environ.get("CTX_CPU_GOV","")},
+    "ram":{"total_mb":int(os.environ.get("CTX_MEM_TOTAL","0") or 0),"used_mb":int(os.environ.get("CTX_MEM_USED","0") or 0),"swap_used_mb":int(os.environ.get("CTX_SWAP_USED","0") or 0)},
+    "gpu":{"driver":os.environ.get("CTX_GPU_DRIVER",""),"gfx":os.environ.get("CTX_GPU_GFX",""),"temp_c":int(os.environ.get("CTX_GPU_TEMP","0") or 0),"util_pct":int(os.environ.get("CTX_GPU_USE","0") or 0)},
+    "npu":{"driver":os.environ.get("CTX_NPU_DRIVER",""),"device":os.environ.get("CTX_NPU_DEVICE","")},
+    "load":{"1min":float(os.environ.get("CTX_LOAD1","0") or 0)},
+    "docker":{"containers":json.loads(os.environ.get("CTX_CONTAINERS","[]"))},
+    "services":json.loads(os.environ.get("CTX_SERVICES","[]")),
+    "zenny":{"running":os.environ.get("CTX_ZENNY_RUNNING","")=="true","models":os.environ.get("CTX_ZENNY_MODELS","").split(",") if os.environ.get("CTX_ZENNY_MODELS","") else []},
+    "ollama":{"running":os.environ.get("CTX_OLLAMA_RUNNING","")=="true"},
+    "ai_backend":{"label":os.environ.get("CTX_BACKEND",""),"model":os.environ.get("CTX_AI_MODEL","")}
 }
 print(json.dumps(d,indent=2))
-' \
-    "${D_CPU_MODEL:-unknown}" "${D_CPU_CORES:-0}" "${D_CPU_GOVERNOR:-unknown}" \
-    "${D_MEM_TOTAL_MB:-0}" "${D_MEM_USED_MB:-0}" "${D_SWAP_USED_MB:-0}" \
-    "${D_GPU_DRIVER:-none}" "${D_GPU_GFX:-unknown}" "${D_GPU_TEMP:-0}" "${D_GPU_USE:-0}" \
-    "${D_NPU_DRIVER:-none}" "${D_NPU_DEVICE:-none}" "${load1:-0}" \
-    "$_containers" "$_services" \
-    "${D_ZENNY_RUNNING:-false}" "$(IFS=,; echo "${D_ZENNY_KEYS[*]}")" \
-    "${D_OLLAMA_RUNNING:-false}" "${AI_BACKEND_LABEL:-none}" "${ZMENU_AI_MODEL:-auto}" \
-    2>/dev/null || echo '{}'
+' 2>/dev/null || echo '{}'
 }
 
 # _cc_write_rules — writes context into opencode's rules file for the session
@@ -2934,7 +3011,7 @@ confirm() {
 submenu_footer() {
     echo ""
     echo -e "  ${DIM}─────────────────────────────────────────${NC}"
-    echo -e "  ${DIM}[Enter]=back    [r]=refresh    [q]=quit zmenu    [?]=help${NC}"
+    echo -e "  ${DIM}[Enter]=back    [r]=refresh    [q]=quit zmenu${NC}"
 }
 
 # ── Session logging ────────────────────────────────────────
@@ -3036,6 +3113,16 @@ dashboard() {
     _disc_hermes || true
     _disc_process_groups || true
     _history_load_trend 5
+
+    # Load sparkline data
+    local _spark_gpu="" _spark_ram="" _spark_load=""
+    local _pts="${ZMENU_SPARKLINE_POINTS:-30}"
+    _sparkline_read "gpu_temp" "$_pts"
+    [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_gpu=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
+    _sparkline_read "ram_used_mb" "$_pts"
+    [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_ram=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
+    _sparkline_read "load1" "$_pts"
+    [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_load=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
 
     # ── AI Engine (computed early, rendered last) ─────────
     local _zenny _zenny_info
@@ -3184,11 +3271,13 @@ except: pass
     # Hardware — primary for a discovery system
     echo -e "  ${BOLD}Hardware${NC}"
     echo -e "    GPU       ${_gpu}  ${_gpu_info}"
+    [[ -n "$_spark_gpu" ]] && echo -e "    ${DIM}      ${_spark_gpu}${NC}"
     echo -e "    NPU       ${_npu}  ${_npu_info}"
     echo -e "    Thermals  ${_therm}  CPU: ${cpu_temp:-?}°C  GPU: ${D_GPU_TEMP:-?}°C"
     local _load_trend=""
     [[ -n "${D_HIST_LOAD1:-}" ]] && _load_trend=$(_history_trend_str "$load1" "$D_HIST_LOAD1" "")
     echo -e "    Load      ${_load}  $(awk '{printf "%s %s %s",$1,$2,$3}' /proc/loadavg)  ${_load_trend} ${DIM}(${D_CPU_CORES} threads)${NC}"
+    [[ -n "$_spark_load" ]] && echo -e "    ${DIM}      ${_spark_load}${NC}"
     if [[ "$_load" == "$FAIL" ]]; then
         echo -e "    ${BRED}→ CRITICAL: System overloaded! Use KILL MODE (option 1)${NC}"
     elif [[ "$_load" == "$WARN" ]]; then
@@ -3200,6 +3289,7 @@ except: pass
     local _ram_trend=""
     [[ -n "${D_HIST_RAM_USED:-}" ]] && _ram_trend=$(_history_trend_str "${D_MEM_USED_MB:-0}" "$D_HIST_RAM_USED" "MB")
     echo -e "  ${BOLD}Memory Pool${NC}    ${_mem}  ${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB used ${_ram_trend} ·  ${D_MEM_AVAIL_MB} MB available"
+    [[ -n "$_spark_ram" ]] && echo -e "    ${DIM}      ${_spark_ram}${NC}"
     echo -e "    ${_swap}  Swap: ${D_SWAP_USED_MB}/${D_SWAP_TOTAL_MB} MB"
     if [[ -n "$mem_consumers" ]]; then
         echo -e "    ${DIM}Top consumers:${NC}"
@@ -8584,13 +8674,24 @@ _watch_alert() {
     fi
 }
 
+# Lightweight discovery for watch mode — only metrics needed for thresholds
+_watch_discover() {
+    _disc_memory || true
+    _disc_gpu || true
+    # GPU temp may be set by _disc_gpu; if not, try sensors fallback
+    if [[ -z "${D_GPU_TEMP:-}" ]] && command -v sensors >/dev/null 2>&1; then
+        D_GPU_TEMP=$(sensors 2>/dev/null | awk '/Tctl|Tdie/{gsub(/[+°C]/,"",$2); print $2; exit}' || echo "0")
+    fi
+    : "${D_GPU_TEMP:=0}"
+}
+
 _watch_mode() {
     cfg_load
     echo -e "${DIM}  zmenu watch mode — checking every ${ZMENU_WATCH_INTERVAL:-30}s${NC}"
     echo "  Press Ctrl+C to stop"
     echo ""
     while true; do
-        discover >/dev/null 2>&1 || true
+        _watch_discover
         local alerts
         alerts=$(_watch_check_thresholds)
         if [[ -n "$alerts" ]]; then
