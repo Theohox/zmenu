@@ -177,6 +177,7 @@ _apply_generic() {
             echo -e "  ${FAIL}  BLOCKED: ${cmd}"
             echo -e "  ${DIM}  Reason: ${_block_reason}${NC}"
             _wiki_log_change "$section" "$cmd" "BLOCKED — ${_block_reason}"
+            _session_log "apply" "$cmd" "BLOCKED — ${_block_reason}"
             continue
         fi
 
@@ -184,9 +185,11 @@ _apply_generic() {
         if _apply_safe_exec "$cmd"; then
             echo -e "  ${OK}  OK"
             _wiki_log_change "$section" "$cmd" "OK"
+            _session_log "apply" "$cmd" "OK"
         else
             echo -e "  ${WARN}  Non-zero: ${cmd}"
             _wiki_log_change "$section" "$cmd" "FAIL"
+            _session_log "apply" "$cmd" "FAIL"
         fi
     done <<< "$cmds"
 }

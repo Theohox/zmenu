@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  —  Built 2026-06-10 18:52:07
+#  Z-MENU  —  Built 2026-06-10 19:00:54
 #  Auto-generated from src/*.sh — edit sources, not this file
 #  Build: ./build.sh
 # ============================================================
@@ -12,21 +12,24 @@
 
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  v5.12.1
+#  Z-MENU  v5.13.0
 #  Local Sovereign Dashboard
 #
 #  INSTALL:   ./build.sh && sudo cp zmenu.sh /usr/local/bin/zmenu
 #  RUN:       zmenu
 #  HEADLESS:  zmenu --run <function_name>
+#  WATCH:     zmenu --watch   (background monitoring)
 #
-#  v5.12.1 — OWASP security hardening:
-#    • Replaced eval with quote-aware safe exec + metacharacter blocking
-#    • Fixed Python heredoc injection (env vars for dynamic data)
-#    • Config file ownership/permission checks before sourcing
-#    • Apply confirmation preview — shows commands, requires y/N
-#    • Error log secret stripping, chmod 600, temp file cleanup trap
-#    • Fixed curl|bash patterns → download-then-review instructions
-#    • Service/file permission hardening (600/700)
+#  v5.13.0 — History, trends, search, watch mode:
+#    • Time-series metrics history → ~/.zmenu/history/metrics.YYYYMMDD.jsonl
+#    • Trend indicators ▲▼ on dashboard (5-min delta)
+#    • Session command logging → ~/.zmenu/history/commands.jsonl
+#    • Background watcher: zmenu --watch with threshold alerts + cooldown
+#    • Universal search (/) — processes, services, ports, wiki, history
+#    • Per-menu help (?) — context-sensitive key reference
+#    • Structured JSON context for AI + action history in prompts
+#    • Recently used menu items on dashboard
+#    • Configurable alert thresholds in ~/.zmenu/config
 #
 #  Architecture:
 #    1. Config       — ~/.zmenu/config (sourced, user-editable)
@@ -42,7 +45,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.12.1"
+readonly ZMENU_VERSION="5.13.0"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
@@ -50,6 +53,8 @@ readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 ZMENU_CONFIG_DIR="${HOME}/.zmenu"
 ZMENU_CONFIG_FILE="${ZMENU_CONFIG_DIR}/config"
 ZMENU_WIKI_DIR="${ZMENU_CONFIG_DIR}/wiki"
+ZMENU_HISTORY_DIR="${ZMENU_CONFIG_DIR}/history"
+ZMENU_SESSION_LOG="${ZMENU_HISTORY_DIR}/commands.jsonl"
 ZMENU_CONTEXT_FILE="/tmp/zmenu-context.md"
 ZMENU_ERROR_LOG="/tmp/zmenu-errors.log"
 ZMENU_REPORT_FILE="${HOME}/zmenu-report.md"
@@ -138,6 +143,14 @@ ZMENU_GPU_GFX_OVERRIDE=""
 
 # Machine label shown in AI system prompts and wiki (defaults to hostname if empty)
 ZMENU_MACHINE_LABEL=""
+
+# ── Background Watch Mode ──────────────────────────────────
+# Run: zmenu --watch   (checks every ZMENU_WATCH_INTERVAL seconds)
+ZMENU_WATCH_INTERVAL=30
+ZMENU_ALERT_GPU_TEMP=85
+ZMENU_ALERT_RAM_PERCENT=90
+ZMENU_ALERT_SWAP_MB=500
+ZMENU_ALERT_LOAD_MULTIPLIER=2
 EOF
     echo -e "  ${BGRN}✓${NC}  Config created: ${ZMENU_CONFIG_FILE}"
 }
@@ -290,6 +303,66 @@ discover() {
     _disc_ports || true
     _sel_ai_backend || true
     ( _wiki_full_refresh ) 2>/dev/null || true
+    _history_append
+}
+
+# ── History & Persistence ──────────────────────────────────
+_history_append() {
+    mkdir -p "$ZMENU_HISTORY_DIR"
+    local hf="$ZMENU_HISTORY_DIR/metrics.$(date +%Y%m%d).jsonl"
+    local load1; load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo "0")
+    printf '%s\n' \
+        "{\"t\":\"$(date -Iseconds)\",\"gpu_temp\":${D_GPU_TEMP:-0},\"gpu_use\":${D_GPU_USE:-0},\"ram_used_mb\":${D_MEM_USED_MB:-0},\"ram_total_mb\":${D_MEM_TOTAL_MB:-0},\"swap_used_mb\":${D_SWAP_USED_MB:-0},\"load1\":${load1},\"docker_containers\":${#D_CONTAINERS[@]}}" \
+        >> "$hf"
+    chmod 600 "$hf" 2>/dev/null || true
+    _history_rotate
+}
+
+_history_rotate() {
+    # Gzip files older than 7 days, remove gzipped files older than 90 days
+    find "$ZMENU_HISTORY_DIR" -name 'metrics.*.jsonl' -mtime +7 -exec gzip -q {} \; 2>/dev/null || true
+    find "$ZMENU_HISTORY_DIR" -name 'metrics.*.jsonl.gz' -mtime +90 -delete 2>/dev/null || true
+}
+
+# Load last N records for trend comparison. Returns deltas as shell variables.
+# Usage: _history_load_trend [minutes_back]  (default: 5)
+_history_load_trend() {
+    local minutes="${1:-5}"
+    local cutoff; cutoff=$(date -d "-${minutes} minutes" +%s 2>/dev/null || echo "0")
+    [[ "$cutoff" == "0" ]] && return
+    local latest_file
+    latest_file=$(ls -1 "$ZMENU_HISTORY_DIR"/metrics.*.jsonl 2>/dev/null | tail -1)
+    [[ -z "$latest_file" ]] && return
+    local last_rec
+    last_rec=$(awk -v c="$cutoff" '
+        BEGIN{FS="\"t\":\""}
+        NF>1{
+            ts=$2; gsub(/\".*/,"",ts)
+            cmd="date -d \"" ts "\" +%s"; cmd | getline epoch; close(cmd)
+            if(epoch>=c){print; exit}
+        }
+    ' "$latest_file" 2>/dev/null)
+    [[ -z "$last_rec" ]] && return
+    # Export deltas
+    D_HIST_GPU_TEMP=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_temp',0))" 2>/dev/null || echo "0")
+    D_HIST_GPU_USE=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_use',0))" 2>/dev/null || echo "0")
+    D_HIST_RAM_USED=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ram_used_mb',0))" 2>/dev/null || echo "0")
+    D_HIST_LOAD1=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('load1',0))" 2>/dev/null || echo "0")
+}
+
+_history_trend_str() {
+    local current="$1" past="$2" label="${3:-}"
+    local delta=0
+    if [[ "$current" =~ ^[0-9]+(\.[0-9]+)?$ && "$past" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        delta=$(echo "$current - $past" | bc -l 2>/dev/null || echo "0")
+        # Strip leading zero/decimal for clean integer display
+        delta=$(printf '%.0f' "$delta" 2>/dev/null || echo "0")
+    fi
+    if [[ "$delta" -gt 0 ]]; then
+        echo "${DIM}▲(+${delta}${label})${NC}"
+    elif [[ "$delta" -lt 0 ]]; then
+        echo "${DIM}▼(${delta}${label})${NC}"
+    fi
 }
 
 # ── CPU ────────────────────────────────────────────────────
@@ -1034,6 +1107,54 @@ _build_context_prompt() {
     printf '%s' "$context"
 }
 
+# Generate structured JSON context for deterministic AI parsing.
+# Included in the system prompt as a fenced JSON block.
+_build_context_json() {
+    local _containers="[]"
+    if [[ ${#D_CONTAINERS[@]} -gt 0 ]]; then
+        _containers=$(printf '%s\n' "${D_CONTAINERS[@]}" | python3 -c '
+import json,sys
+arr=[]
+for l in sys.stdin:
+    l=l.strip()
+    if not l: continue
+    parts=l.split(":",1)
+    arr.append({"name":parts[0],"status":parts[1] if len(parts)>1 else "unknown"})
+print(json.dumps(arr))
+' 2>/dev/null || echo "[]")
+    fi
+    local _services="[]"
+    if [[ ${#D_SERVICES[@]} -gt 0 ]]; then
+        _services=$(printf '%s\n' "${D_SERVICES[@]}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' 2>/dev/null || echo "[]")
+    fi
+    python3 -c '
+import json,sys
+args=sys.argv[1:]
+cpu_model,cpu_cores,cpu_gov,mem_total,mem_used,swap_used,gpu_driver,gpu_gfx,gpu_temp,gpu_use,npu_driver,npu_device,load1,containers_json,services_json,zenny_running,zenny_models,ollama_running,backend_label,ai_model=args
+d={
+    "cpu":{"model":cpu_model,"cores":int(cpu_cores or 0),"governor":cpu_gov},
+    "ram":{"total_mb":int(mem_total or 0),"used_mb":int(mem_used or 0),"swap_used_mb":int(swap_used or 0)},
+    "gpu":{"driver":gpu_driver,"gfx":gpu_gfx,"temp_c":int(gpu_temp or 0),"util_pct":int(gpu_use or 0)},
+    "npu":{"driver":npu_driver,"device":npu_device},
+    "load":{"1min":float(load1 or 0)},
+    "docker":{"containers":json.loads(containers_json)},
+    "services":json.loads(services_json),
+    "zenny":{"running":zenny_running=="true","models":zenny_models.split(",") if zenny_models else []},
+    "ollama":{"running":ollama_running=="true"},
+    "ai_backend":{"label":backend_label,"model":ai_model}
+}
+print(json.dumps(d,indent=2))
+' \
+    "${D_CPU_MODEL:-unknown}" "${D_CPU_CORES:-0}" "${D_CPU_GOVERNOR:-unknown}" \
+    "${D_MEM_TOTAL_MB:-0}" "${D_MEM_USED_MB:-0}" "${D_SWAP_USED_MB:-0}" \
+    "${D_GPU_DRIVER:-none}" "${D_GPU_GFX:-unknown}" "${D_GPU_TEMP:-0}" "${D_GPU_USE:-0}" \
+    "${D_NPU_DRIVER:-none}" "${D_NPU_DEVICE:-none}" "${load1:-0}" \
+    "$_containers" "$_services" \
+    "${D_ZENNY_RUNNING:-false}" "$(IFS=,; echo "${D_ZENNY_KEYS[*]}")" \
+    "${D_OLLAMA_RUNNING:-false}" "${AI_BACKEND_LABEL:-none}" "${ZMENU_AI_MODEL:-auto}" \
+    2>/dev/null || echo '{}'
+}
+
 # _cc_write_rules — writes context into opencode's rules file for the session
 # OpenCode auto-loads ~/.config/opencode/rules.md as persistent instructions
 _cc_write_rules() {
@@ -1284,6 +1405,16 @@ $(grep -A3 '^## ' "${ZMENU_WIKI_DIR}/changes.md" | tail -30)"
     local _machine="${ZMENU_MACHINE_LABEL:-$(hostname 2>/dev/null || echo 'this machine')}"
     local _os; _os=$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-Linux}" || uname -sr)
 
+    # Action history — last 10 applied commands for AI context
+    local _action_history=""
+    if [[ -f "$ZMENU_SESSION_LOG" ]]; then
+        _action_history=$(tail -50 "$ZMENU_SESSION_LOG" 2>/dev/null | grep '"action":"apply"' | tail -10 | \
+            python3 -c "import sys,json; [print(f\"- {json.loads(l).get('t','')}  {json.loads(l).get('detail','')}\") for l in sys.stdin]" 2>/dev/null || true)
+    fi
+
+    local _ctx_json
+    _ctx_json=$(_build_context_json 2>/dev/null || echo '{}')
+
     local sys_prompt
     sys_prompt="## MACHINE FACTS — read these first, do not contradict them
 Machine:        ${_machine} — ${_os}
@@ -1295,9 +1426,18 @@ NPU:            ${_npu_driver}  ${_npu_device}
 AI backend:     ${AI_BACKEND_LABEL}  (model: ${ZMENU_AI_MODEL:-auto})
 RAM used:       ${_mem_used} MB of ${_mem_total} MB
 
+## Structured Data (DO NOT MODIFY THIS JSON BLOCK)
+\`\`\`json
+${_ctx_json}
+\`\`\`
+
 ## Section: ${section_title}
 
 ${scoped_context}
+
+---
+## Recent Actions (what the user already did)
+${_action_history:-(no recent actions)}
 
 ---
 ## Your role
@@ -1307,6 +1447,8 @@ contradict them or suggest alternatives already present.
 Be concise and direct. Give exact copy-paste commands.
 When the user types 'apply', the last suggestion has been run —
 acknowledge it and advise what to check next.
+If the user already performed an action recently, do not suggest it again —
+instead suggest the NEXT logical step.
 
 ## Rules for reading command output
 - In 'ls -la' output, the number in column 2 of directory entries is the HARD LINK COUNT, not a file count. The file count is the number of non-. and non-.. lines shown.
@@ -1611,6 +1753,7 @@ _apply_generic() {
             echo -e "  ${FAIL}  BLOCKED: ${cmd}"
             echo -e "  ${DIM}  Reason: ${_block_reason}${NC}"
             _wiki_log_change "$section" "$cmd" "BLOCKED — ${_block_reason}"
+            _session_log "apply" "$cmd" "BLOCKED — ${_block_reason}"
             continue
         fi
 
@@ -1618,9 +1761,11 @@ _apply_generic() {
         if _apply_safe_exec "$cmd"; then
             echo -e "  ${OK}  OK"
             _wiki_log_change "$section" "$cmd" "OK"
+            _session_log "apply" "$cmd" "OK"
         else
             echo -e "  ${WARN}  Non-zero: ${cmd}"
             _wiki_log_change "$section" "$cmd" "FAIL"
+            _session_log "apply" "$cmd" "FAIL"
         fi
     done <<< "$cmds"
 }
@@ -2353,15 +2498,19 @@ _kill_process_menu() {
         k)
             if kill -TERM "$pid" 2>/dev/null; then
                 echo -e "  ${OK}  Sent SIGTERM to ${pname} (pid ${pid})"
+                _session_log "kill" "SIGTERM ${pname} (pid ${pid})" "OK"
             else
                 echo -e "  ${FAIL}  Failed — try SIGKILL or run with sudo"
+                _session_log "kill" "SIGTERM ${pname} (pid ${pid})" "FAIL"
             fi
             ;;
         K)
             if kill -KILL "$pid" 2>/dev/null; then
                 echo -e "  ${OK}  Sent SIGKILL to ${pname} (pid ${pid})"
+                _session_log "kill" "SIGKILL ${pname} (pid ${pid})" "OK"
             else
                 echo -e "  ${FAIL}  Failed — check permissions (maybe root-owned?)"
+                _session_log "kill" "SIGKILL ${pname} (pid ${pid})" "FAIL"
             fi
             ;;
         i|I)
@@ -2563,6 +2712,7 @@ _kill_groups() {
                         ;;
                 esac
                 echo -e "  ${OK}  ${gname} shutdown signal sent"
+                _session_log "kill_group" "${gname} (${gcount} procs, ${gram}MB)" "OK"
                 sleep 1
             fi
         fi
@@ -2784,7 +2934,17 @@ confirm() {
 submenu_footer() {
     echo ""
     echo -e "  ${DIM}─────────────────────────────────────────${NC}"
-    echo -e "  ${DIM}[Enter]=back    [r]=refresh    [q]=quit zmenu${NC}"
+    echo -e "  ${DIM}[Enter]=back    [r]=refresh    [q]=quit zmenu    [?]=help${NC}"
+}
+
+# ── Session logging ────────────────────────────────────────
+_session_log() {
+    local action="$1"
+    local detail="${2:-}"
+    local result="${3:-}"
+    mkdir -p "$ZMENU_HISTORY_DIR"
+    printf '%s\n' "{\"t\":\"$(date -Iseconds)\",\"action\":\"${action}\",\"detail\":\"${detail}\",\"result\":\"${result}\"}" >> "$ZMENU_SESSION_LOG"
+    chmod 600 "$ZMENU_SESSION_LOG" 2>/dev/null || true
 }
 
 # ── Export function — available from any screen ────────────
@@ -2875,6 +3035,7 @@ dashboard() {
     _disc_lemonade || true
     _disc_hermes || true
     _disc_process_groups || true
+    _history_load_trend 5
 
     # ── AI Engine (computed early, rendered last) ─────────
     local _zenny _zenny_info
@@ -2943,10 +3104,13 @@ except: pass
 
     # ── GPU ───────────────────────────────────────────────
     local _gpu _gpu_info
+    local _gpu_trend="" _gpu_use_trend=""
+    [[ -n "${D_HIST_GPU_TEMP:-}" ]] && _gpu_trend=$(_history_trend_str "${D_GPU_TEMP:-0}" "$D_HIST_GPU_TEMP" "°C")
+    [[ -n "${D_HIST_GPU_USE:-}" ]]  && _gpu_use_trend=$(_history_trend_str "${D_GPU_USE:-0}" "$D_HIST_GPU_USE" "%")
     case "$D_GPU_DRIVER" in
-        rocm)         _gpu=$OK;   _gpu_info="${D_GPU_GFX}  ${D_GPU_TEMP:-?}°C  ${D_GPU_USE:-?}%" ;;
-        nvidia)       _gpu=$OK;   _gpu_info="${D_GPU_GFX}  ${D_GPU_TEMP:-?}°C  ${D_GPU_USE:-?}%" ;;
-        amdgpu-sysfs) _gpu=$WARN; _gpu_info="sysfs only  ${D_GPU_TEMP:-?}°C  ${DIM}(rocm-smi not in PATH)${NC}" ;;
+        rocm)         _gpu=$OK;   _gpu_info="${D_GPU_GFX}  ${D_GPU_TEMP:-?}°C ${_gpu_trend}  ${D_GPU_USE:-?}% ${_gpu_use_trend}" ;;
+        nvidia)       _gpu=$OK;   _gpu_info="${D_GPU_GFX}  ${D_GPU_TEMP:-?}°C ${_gpu_trend}  ${D_GPU_USE:-?}% ${_gpu_use_trend}" ;;
+        amdgpu-sysfs) _gpu=$WARN; _gpu_info="sysfs only  ${D_GPU_TEMP:-?}°C ${_gpu_trend}  ${DIM}(rocm-smi not in PATH)${NC}" ;;
         *)            _gpu=$IDLE; _gpu_info="not detected" ;;
     esac
 
@@ -3008,12 +3172,23 @@ except: pass
     echo -e "  ${BOLD}${BBLU}┄ DASHBOARD ────────────────────────────────────────────${NC}"
     echo ""
 
+    # Recently used — top 3 recent menu selections from session log
+    local _recent
+    _recent=$(tail -100 "$ZMENU_SESSION_LOG" 2>/dev/null | grep '"action":"menu_select"' | \
+        python3 -c "import sys,json; items=[json.loads(l).get('detail','') for l in sys.stdin]; uniq=[]; [uniq.append(x) for x in items if x not in uniq]; print(', '.join(uniq[:3]))" 2>/dev/null || true)
+    if [[ -n "$_recent" ]]; then
+        echo -e "  ${DIM}Recent:${NC}  $_recent"
+        echo ""
+    fi
+
     # Hardware — primary for a discovery system
     echo -e "  ${BOLD}Hardware${NC}"
     echo -e "    GPU       ${_gpu}  ${_gpu_info}"
     echo -e "    NPU       ${_npu}  ${_npu_info}"
     echo -e "    Thermals  ${_therm}  CPU: ${cpu_temp:-?}°C  GPU: ${D_GPU_TEMP:-?}°C"
-    echo -e "    Load      ${_load}  $(awk '{printf "%s %s %s",$1,$2,$3}' /proc/loadavg)  ${DIM}(${D_CPU_CORES} threads)${NC}"
+    local _load_trend=""
+    [[ -n "${D_HIST_LOAD1:-}" ]] && _load_trend=$(_history_trend_str "$load1" "$D_HIST_LOAD1" "")
+    echo -e "    Load      ${_load}  $(awk '{printf "%s %s %s",$1,$2,$3}' /proc/loadavg)  ${_load_trend} ${DIM}(${D_CPU_CORES} threads)${NC}"
     if [[ "$_load" == "$FAIL" ]]; then
         echo -e "    ${BRED}→ CRITICAL: System overloaded! Use KILL MODE (option 1)${NC}"
     elif [[ "$_load" == "$WARN" ]]; then
@@ -3022,7 +3197,9 @@ except: pass
     echo ""
 
     # Memory Pool
-    echo -e "  ${BOLD}Memory Pool${NC}    ${_mem}  ${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB used  ·  ${D_MEM_AVAIL_MB} MB available"
+    local _ram_trend=""
+    [[ -n "${D_HIST_RAM_USED:-}" ]] && _ram_trend=$(_history_trend_str "${D_MEM_USED_MB:-0}" "$D_HIST_RAM_USED" "MB")
+    echo -e "  ${BOLD}Memory Pool${NC}    ${_mem}  ${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB used ${_ram_trend} ·  ${D_MEM_AVAIL_MB} MB available"
     echo -e "    ${_swap}  Swap: ${D_SWAP_USED_MB}/${D_SWAP_TOTAL_MB} MB"
     if [[ -n "$mem_consumers" ]]; then
         echo -e "    ${DIM}Top consumers:${NC}"
@@ -8242,6 +8419,91 @@ _cc_proj_detail() {
 }
 
 # ============================================================
+#  UNIVERSAL SEARCH
+# ============================================================
+
+_search_universal() {
+    header
+    echo -e "${BCYN}┄ SEARCH ───────────────────────────────────────────────${NC}"
+    echo ""
+    printf '  Query: '
+    local query=""
+    IFS= read -r query
+    [[ -z "$query" ]] && return
+    echo ""
+
+    # Processes
+    echo -e "  ${BOLD}Processes:${NC}"
+    ps aux 2>/dev/null | grep -i "$query" | grep -v grep | head -5 | \
+        awk '{printf "    %-12s %5.1f%% %6.0f MB  %s\n", $2, $3, $6/1024, $11}' || true
+    echo ""
+
+    # Services
+    echo -e "  ${BOLD}Services:${NC}"
+    printf '%s\n' "${D_SERVICES[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' || true
+    echo ""
+
+    # Ports
+    echo -e "  ${BOLD}Ports:${NC}"
+    printf '%s\n' "${D_OPEN_PORTS[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' || true
+    echo ""
+
+    # Wiki
+    echo -e "  ${BOLD}Wiki:${NC}"
+    grep -ri "$query" "$ZMENU_WIKI_DIR"/*.md 2>/dev/null | head -5 | sed 's/^/    /' || true
+    echo ""
+
+    # Session history
+    echo -e "  ${BOLD}Recent commands:${NC}"
+    tail -20 "$ZMENU_SESSION_LOG" 2>/dev/null | grep -i "$query" | \
+        python3 -c "import sys,json; [print('    ',json.loads(l).get('t',''),json.loads(l).get('action',''),json.loads(l).get('detail','')) for l in sys.stdin]" 2>/dev/null || true
+    echo ""
+
+    pause
+}
+
+# ============================================================
+#  PER-MENU HELP
+# ============================================================
+
+_menu_help_main() {
+    header
+    echo -e "${BCYN}┄ HELP ─ MAIN MENU ─────────────────────────────────────${NC}"
+    echo ""
+    echo "  1) KILL MODE      — Stop runaway processes. Shows top CPU/RAM"
+    echo "                      consumers with memory and CPU usage."
+    echo "                      Press a number to send SIGTERM, S for SIGKILL."
+    echo ""
+    echo "  2) AI Engine      — Manage inference backends (Zenny-Core,"
+    echo "                      Ollama, OpenCode, LLM-Gateway)."
+    echo "                      Start, stop, load/unload models, benchmark."
+    echo ""
+    echo "  3) Docker         — Start/stop Docker, view containers,"
+    echo "                      prune images, view logs."
+    echo ""
+    echo "  4) System Scan    — Security audit: firewall, ports, VPN,"
+    echo "                      unknown services, telemetry opt-outs."
+    echo ""
+    echo "  5) Hardware       — GPU, NPU, CPU, thermals, power profiles,"
+    echo "                      PCIe info, disk health."
+    echo ""
+    echo "  6) Find Problems  — Automated bottleneck sweep with fixes."
+    echo "                      Press C to Ask AI for deeper analysis."
+    echo ""
+    echo "  7) Projects       — Open projects, create new ones,"
+    echo "                      scaffold AI.md, launch coding sessions."
+    echo ""
+    echo "  8) Settings       — Edit config, check versions, reinstall."
+    echo ""
+    echo "  r) Refresh        — Re-run discovery to update live metrics"
+    echo "  /) Search         — Fuzzy search processes, services, wiki"
+    echo "  E) Export         — Save full markdown report to ~/zmenu-report.md"
+    echo "  q) Exit           — Quit zmenu"
+    echo ""
+    pause
+}
+
+# ============================================================
 #  SECTION 7 — MAIN MENU
 # ============================================================
 
@@ -8265,23 +8527,81 @@ main_menu() {
         echo "   7)  Projects               (open · create · AI sessions)"
         echo "   8)  Settings               (config · editor · reinstall)"
         echo ""
-        echo "   r)  Refresh    E)  Export full report    q)  Exit"
+        echo "   r)  Refresh    /)  Search    ?)  Help    E)  Export    q)  Exit"
         echo ""
         read -rp "  $(printf '%b' "${BOLD}Selection:${NC} ")" choice
         case $choice in
-            1) mod_kill_mode ;;
-            2) mod_ai_engine ;;
-            3) mod_apps_services ;;
-            4) mod_system_scan ;;
-            5) mod_hardware ;;
-            6) mod_find_problems ;;
-            7) mod_projects ;;
-            8) mod_settings ;;
+            1) _session_log "menu_select" "KILL MODE"; mod_kill_mode ;;
+            2) _session_log "menu_select" "AI Engine"; mod_ai_engine ;;
+            3) _session_log "menu_select" "Docker & Services"; mod_apps_services ;;
+            4) _session_log "menu_select" "System Scan"; mod_system_scan ;;
+            5) _session_log "menu_select" "Hardware"; mod_hardware ;;
+            6) _session_log "menu_select" "Find Problems"; mod_find_problems ;;
+            7) _session_log "menu_select" "Projects"; mod_projects ;;
+            8) _session_log "menu_select" "Settings"; mod_settings ;;
             r|R) discover ;;
+            /) _search_universal ;;
+            \?) _menu_help_main ;;
             E) export_report "Full System"; pause ;;
             q|Q) printf '\n%b  Sovereign. Signing off.%b\n\n' "${BGRN}" "${NC}"; exit 0 ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 0.5 ;;
         esac
+    done
+}
+
+# ============================================================
+#  WATCH MODE — background monitoring
+# ============================================================
+
+_watch_check_thresholds() {
+    local alerts=""
+    [[ "${D_GPU_TEMP:-0}" -gt "${ZMENU_ALERT_GPU_TEMP:-85}" ]] && \
+        alerts+="GPU temp: ${D_GPU_TEMP}°C (threshold: ${ZMENU_ALERT_GPU_TEMP:-85}°C)\n"
+    local ram_pct=0
+    [[ "${D_MEM_TOTAL_MB:-0}" -gt 0 ]] && ram_pct=$((D_MEM_USED_MB * 100 / D_MEM_TOTAL_MB))
+    [[ "$ram_pct" -gt "${ZMENU_ALERT_RAM_PERCENT:-90}" ]] && \
+        alerts+="RAM usage: ${ram_pct}% (threshold: ${ZMENU_ALERT_RAM_PERCENT:-90}%)\n"
+    [[ "${D_SWAP_USED_MB:-0}" -gt "${ZMENU_ALERT_SWAP_MB:-500}" ]] && \
+        alerts+="Swap: ${D_SWAP_USED_MB} MB (threshold: ${ZMENU_ALERT_SWAP_MB:-500} MB)\n"
+    local core_count=${D_CPU_CORES:-4}
+    local load1; load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo "0")
+    local load_int=${load1%.*}
+    [[ "$load_int" -gt $((core_count * ${ZMENU_ALERT_LOAD_MULTIPLIER:-2})) ]] && \
+        alerts+="Load: ${load1} (threshold: $((core_count * ${ZMENU_ALERT_LOAD_MULTIPLIER:-2})))\n"
+    printf '%b' "$alerts"
+}
+
+_watch_alert() {
+    local key="$1" message="$2"
+    local state_file="/tmp/zmenu-alert-${key}"
+    local last_alert=0 now
+    now=$(date +%s)
+    [[ -f "$state_file" ]] && last_alert=$(cat "$state_file" 2>/dev/null || echo "0")
+    if (( now - last_alert > 600 )); then
+        notify-send -u critical "zmenu alert" "$message" 2>/dev/null || \
+            echo -e "\a\n$(date '+%H:%M') ALERT [$key]: $message" >> "$ZMENU_ERROR_LOG"
+        echo "$now" > "$state_file"
+    fi
+}
+
+_watch_mode() {
+    cfg_load
+    echo -e "${DIM}  zmenu watch mode — checking every ${ZMENU_WATCH_INTERVAL:-30}s${NC}"
+    echo "  Press Ctrl+C to stop"
+    echo ""
+    while true; do
+        discover >/dev/null 2>&1 || true
+        local alerts
+        alerts=$(_watch_check_thresholds)
+        if [[ -n "$alerts" ]]; then
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                local key
+                key=$(echo "$line" | awk '{print $1}' | tr -d ':')
+                _watch_alert "$key" "$line"
+            done <<< "$alerts"
+        fi
+        sleep "${ZMENU_WATCH_INTERVAL:-30}"
     done
 }
 
@@ -8308,6 +8628,9 @@ case "${1:-}" in
             exit 1
         fi
         ;;
+    --watch|-w)
+        _watch_mode
+        ;;
     --context)
         _bootstrap
         context_generate
@@ -8321,8 +8644,9 @@ case "${1:-}" in
         exit 0
         ;;
     --help|-h)
-        echo "Usage: zmenu [--run <function>] [--context] [--export] [--help]"
+        echo "Usage: zmenu [--run <function>] [--watch] [--context] [--export] [--help]"
         echo "  --run <fn>    Execute a module function headlessly"
+        echo "  --watch       Background monitoring with threshold alerts"
         echo "  --context     Dump live system context to stdout"
         echo "  --export      Generate markdown report to ~/zmenu-report.md"
         exit 0

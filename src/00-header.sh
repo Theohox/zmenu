@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  v5.12.1
+#  Z-MENU  v5.13.0
 #  Local Sovereign Dashboard
 #
 #  INSTALL:   ./build.sh && sudo cp zmenu.sh /usr/local/bin/zmenu
 #  RUN:       zmenu
 #  HEADLESS:  zmenu --run <function_name>
+#  WATCH:     zmenu --watch   (background monitoring)
 #
-#  v5.12.1 — OWASP security hardening:
-#    • Replaced eval with quote-aware safe exec + metacharacter blocking
-#    • Fixed Python heredoc injection (env vars for dynamic data)
-#    • Config file ownership/permission checks before sourcing
-#    • Apply confirmation preview — shows commands, requires y/N
-#    • Error log secret stripping, chmod 600, temp file cleanup trap
-#    • Fixed curl|bash patterns → download-then-review instructions
-#    • Service/file permission hardening (600/700)
+#  v5.13.0 — History, trends, search, watch mode:
+#    • Time-series metrics history → ~/.zmenu/history/metrics.YYYYMMDD.jsonl
+#    • Trend indicators ▲▼ on dashboard (5-min delta)
+#    • Session command logging → ~/.zmenu/history/commands.jsonl
+#    • Background watcher: zmenu --watch with threshold alerts + cooldown
+#    • Universal search (/) — processes, services, ports, wiki, history
+#    • Per-menu help (?) — context-sensitive key reference
+#    • Structured JSON context for AI + action history in prompts
+#    • Recently used menu items on dashboard
+#    • Configurable alert thresholds in ~/.zmenu/config
 #
 #  Architecture:
 #    1. Config       — ~/.zmenu/config (sourced, user-editable)
@@ -30,7 +33,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.12.1"
+readonly ZMENU_VERSION="5.13.0"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
@@ -38,6 +41,8 @@ readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 ZMENU_CONFIG_DIR="${HOME}/.zmenu"
 ZMENU_CONFIG_FILE="${ZMENU_CONFIG_DIR}/config"
 ZMENU_WIKI_DIR="${ZMENU_CONFIG_DIR}/wiki"
+ZMENU_HISTORY_DIR="${ZMENU_CONFIG_DIR}/history"
+ZMENU_SESSION_LOG="${ZMENU_HISTORY_DIR}/commands.jsonl"
 ZMENU_CONTEXT_FILE="/tmp/zmenu-context.md"
 ZMENU_ERROR_LOG="/tmp/zmenu-errors.log"
 ZMENU_REPORT_FILE="${HOME}/zmenu-report.md"

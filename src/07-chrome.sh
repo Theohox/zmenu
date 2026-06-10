@@ -25,7 +25,17 @@ confirm() {
 submenu_footer() {
     echo ""
     echo -e "  ${DIM}─────────────────────────────────────────${NC}"
-    echo -e "  ${DIM}[Enter]=back    [r]=refresh    [q]=quit zmenu${NC}"
+    echo -e "  ${DIM}[Enter]=back    [r]=refresh    [q]=quit zmenu    [?]=help${NC}"
+}
+
+# ── Session logging ────────────────────────────────────────
+_session_log() {
+    local action="$1"
+    local detail="${2:-}"
+    local result="${3:-}"
+    mkdir -p "$ZMENU_HISTORY_DIR"
+    printf '%s\n' "{\"t\":\"$(date -Iseconds)\",\"action\":\"${action}\",\"detail\":\"${detail}\",\"result\":\"${result}\"}" >> "$ZMENU_SESSION_LOG"
+    chmod 600 "$ZMENU_SESSION_LOG" 2>/dev/null || true
 }
 
 # ── Export function — available from any screen ────────────
@@ -116,6 +126,7 @@ dashboard() {
     _disc_lemonade || true
     _disc_hermes || true
     _disc_process_groups || true
+    _history_load_trend 5
 
     # ── AI Engine (computed early, rendered last) ─────────
     local _zenny _zenny_info
@@ -184,10 +195,13 @@ except: pass
 
     # ── GPU ───────────────────────────────────────────────
     local _gpu _gpu_info
+    local _gpu_trend="" _gpu_use_trend=""
+    [[ -n "${D_HIST_GPU_TEMP:-}" ]] && _gpu_trend=$(_history_trend_str "${D_GPU_TEMP:-0}" "$D_HIST_GPU_TEMP" "°C")
+    [[ -n "${D_HIST_GPU_USE:-}" ]]  && _gpu_use_trend=$(_history_trend_str "${D_GPU_USE:-0}" "$D_HIST_GPU_USE" "%")
     case "$D_GPU_DRIVER" in
-        rocm)         _gpu=$OK;   _gpu_info="${D_GPU_GFX}  ${D_GPU_TEMP:-?}°C  ${D_GPU_USE:-?}%" ;;
-        nvidia)       _gpu=$OK;   _gpu_info="${D_GPU_GFX}  ${D_GPU_TEMP:-?}°C  ${D_GPU_USE:-?}%" ;;
-        amdgpu-sysfs) _gpu=$WARN; _gpu_info="sysfs only  ${D_GPU_TEMP:-?}°C  ${DIM}(rocm-smi not in PATH)${NC}" ;;
+        rocm)         _gpu=$OK;   _gpu_info="${D_GPU_GFX}  ${D_GPU_TEMP:-?}°C ${_gpu_trend}  ${D_GPU_USE:-?}% ${_gpu_use_trend}" ;;
+        nvidia)       _gpu=$OK;   _gpu_info="${D_GPU_GFX}  ${D_GPU_TEMP:-?}°C ${_gpu_trend}  ${D_GPU_USE:-?}% ${_gpu_use_trend}" ;;
+        amdgpu-sysfs) _gpu=$WARN; _gpu_info="sysfs only  ${D_GPU_TEMP:-?}°C ${_gpu_trend}  ${DIM}(rocm-smi not in PATH)${NC}" ;;
         *)            _gpu=$IDLE; _gpu_info="not detected" ;;
     esac
 
@@ -249,12 +263,23 @@ except: pass
     echo -e "  ${BOLD}${BBLU}┄ DASHBOARD ────────────────────────────────────────────${NC}"
     echo ""
 
+    # Recently used — top 3 recent menu selections from session log
+    local _recent
+    _recent=$(tail -100 "$ZMENU_SESSION_LOG" 2>/dev/null | grep '"action":"menu_select"' | \
+        python3 -c "import sys,json; items=[json.loads(l).get('detail','') for l in sys.stdin]; uniq=[]; [uniq.append(x) for x in items if x not in uniq]; print(', '.join(uniq[:3]))" 2>/dev/null || true)
+    if [[ -n "$_recent" ]]; then
+        echo -e "  ${DIM}Recent:${NC}  $_recent"
+        echo ""
+    fi
+
     # Hardware — primary for a discovery system
     echo -e "  ${BOLD}Hardware${NC}"
     echo -e "    GPU       ${_gpu}  ${_gpu_info}"
     echo -e "    NPU       ${_npu}  ${_npu_info}"
     echo -e "    Thermals  ${_therm}  CPU: ${cpu_temp:-?}°C  GPU: ${D_GPU_TEMP:-?}°C"
-    echo -e "    Load      ${_load}  $(awk '{printf "%s %s %s",$1,$2,$3}' /proc/loadavg)  ${DIM}(${D_CPU_CORES} threads)${NC}"
+    local _load_trend=""
+    [[ -n "${D_HIST_LOAD1:-}" ]] && _load_trend=$(_history_trend_str "$load1" "$D_HIST_LOAD1" "")
+    echo -e "    Load      ${_load}  $(awk '{printf "%s %s %s",$1,$2,$3}' /proc/loadavg)  ${_load_trend} ${DIM}(${D_CPU_CORES} threads)${NC}"
     if [[ "$_load" == "$FAIL" ]]; then
         echo -e "    ${BRED}→ CRITICAL: System overloaded! Use KILL MODE (option 1)${NC}"
     elif [[ "$_load" == "$WARN" ]]; then
@@ -263,7 +288,9 @@ except: pass
     echo ""
 
     # Memory Pool
-    echo -e "  ${BOLD}Memory Pool${NC}    ${_mem}  ${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB used  ·  ${D_MEM_AVAIL_MB} MB available"
+    local _ram_trend=""
+    [[ -n "${D_HIST_RAM_USED:-}" ]] && _ram_trend=$(_history_trend_str "${D_MEM_USED_MB:-0}" "$D_HIST_RAM_USED" "MB")
+    echo -e "  ${BOLD}Memory Pool${NC}    ${_mem}  ${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB used ${_ram_trend} ·  ${D_MEM_AVAIL_MB} MB available"
     echo -e "    ${_swap}  Swap: ${D_SWAP_USED_MB}/${D_SWAP_TOTAL_MB} MB"
     if [[ -n "$mem_consumers" ]]; then
         echo -e "    ${DIM}Top consumers:${NC}"

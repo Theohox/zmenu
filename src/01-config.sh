@@ -41,6 +41,14 @@ ZMENU_GPU_GFX_OVERRIDE=""
 
 # Machine label shown in AI system prompts and wiki (defaults to hostname if empty)
 ZMENU_MACHINE_LABEL=""
+
+# ── Background Watch Mode ──────────────────────────────────
+# Run: zmenu --watch   (checks every ZMENU_WATCH_INTERVAL seconds)
+ZMENU_WATCH_INTERVAL=30
+ZMENU_ALERT_GPU_TEMP=85
+ZMENU_ALERT_RAM_PERCENT=90
+ZMENU_ALERT_SWAP_MB=500
+ZMENU_ALERT_LOAD_MULTIPLIER=2
 EOF
     echo -e "  ${BGRN}✓${NC}  Config created: ${ZMENU_CONFIG_FILE}"
 }

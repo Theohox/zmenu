@@ -117,6 +117,66 @@ discover() {
     _disc_ports || true
     _sel_ai_backend || true
     ( _wiki_full_refresh ) 2>/dev/null || true
+    _history_append
+}
+
+# ── History & Persistence ──────────────────────────────────
+_history_append() {
+    mkdir -p "$ZMENU_HISTORY_DIR"
+    local hf="$ZMENU_HISTORY_DIR/metrics.$(date +%Y%m%d).jsonl"
+    local load1; load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo "0")
+    printf '%s\n' \
+        "{\"t\":\"$(date -Iseconds)\",\"gpu_temp\":${D_GPU_TEMP:-0},\"gpu_use\":${D_GPU_USE:-0},\"ram_used_mb\":${D_MEM_USED_MB:-0},\"ram_total_mb\":${D_MEM_TOTAL_MB:-0},\"swap_used_mb\":${D_SWAP_USED_MB:-0},\"load1\":${load1},\"docker_containers\":${#D_CONTAINERS[@]}}" \
+        >> "$hf"
+    chmod 600 "$hf" 2>/dev/null || true
+    _history_rotate
+}
+
+_history_rotate() {
+    # Gzip files older than 7 days, remove gzipped files older than 90 days
+    find "$ZMENU_HISTORY_DIR" -name 'metrics.*.jsonl' -mtime +7 -exec gzip -q {} \; 2>/dev/null || true
+    find "$ZMENU_HISTORY_DIR" -name 'metrics.*.jsonl.gz' -mtime +90 -delete 2>/dev/null || true
+}
+
+# Load last N records for trend comparison. Returns deltas as shell variables.
+# Usage: _history_load_trend [minutes_back]  (default: 5)
+_history_load_trend() {
+    local minutes="${1:-5}"
+    local cutoff; cutoff=$(date -d "-${minutes} minutes" +%s 2>/dev/null || echo "0")
+    [[ "$cutoff" == "0" ]] && return
+    local latest_file
+    latest_file=$(ls -1 "$ZMENU_HISTORY_DIR"/metrics.*.jsonl 2>/dev/null | tail -1)
+    [[ -z "$latest_file" ]] && return
+    local last_rec
+    last_rec=$(awk -v c="$cutoff" '
+        BEGIN{FS="\"t\":\""}
+        NF>1{
+            ts=$2; gsub(/\".*/,"",ts)
+            cmd="date -d \"" ts "\" +%s"; cmd | getline epoch; close(cmd)
+            if(epoch>=c){print; exit}
+        }
+    ' "$latest_file" 2>/dev/null)
+    [[ -z "$last_rec" ]] && return
+    # Export deltas
+    D_HIST_GPU_TEMP=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_temp',0))" 2>/dev/null || echo "0")
+    D_HIST_GPU_USE=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('gpu_use',0))" 2>/dev/null || echo "0")
+    D_HIST_RAM_USED=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ram_used_mb',0))" 2>/dev/null || echo "0")
+    D_HIST_LOAD1=$(echo "$last_rec" | python3 -c "import sys,json; print(json.load(sys.stdin).get('load1',0))" 2>/dev/null || echo "0")
+}
+
+_history_trend_str() {
+    local current="$1" past="$2" label="${3:-}"
+    local delta=0
+    if [[ "$current" =~ ^[0-9]+(\.[0-9]+)?$ && "$past" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        delta=$(echo "$current - $past" | bc -l 2>/dev/null || echo "0")
+        # Strip leading zero/decimal for clean integer display
+        delta=$(printf '%.0f' "$delta" 2>/dev/null || echo "0")
+    fi
+    if [[ "$delta" -gt 0 ]]; then
+        echo "${DIM}▲(+${delta}${label})${NC}"
+    elif [[ "$delta" -lt 0 ]]; then
+        echo "${DIM}▼(${delta}${label})${NC}"
+    fi
 }
 
 # ── CPU ────────────────────────────────────────────────────

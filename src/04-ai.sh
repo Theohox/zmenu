@@ -59,6 +59,54 @@ _build_context_prompt() {
     printf '%s' "$context"
 }
 
+# Generate structured JSON context for deterministic AI parsing.
+# Included in the system prompt as a fenced JSON block.
+_build_context_json() {
+    local _containers="[]"
+    if [[ ${#D_CONTAINERS[@]} -gt 0 ]]; then
+        _containers=$(printf '%s\n' "${D_CONTAINERS[@]}" | python3 -c '
+import json,sys
+arr=[]
+for l in sys.stdin:
+    l=l.strip()
+    if not l: continue
+    parts=l.split(":",1)
+    arr.append({"name":parts[0],"status":parts[1] if len(parts)>1 else "unknown"})
+print(json.dumps(arr))
+' 2>/dev/null || echo "[]")
+    fi
+    local _services="[]"
+    if [[ ${#D_SERVICES[@]} -gt 0 ]]; then
+        _services=$(printf '%s\n' "${D_SERVICES[@]}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' 2>/dev/null || echo "[]")
+    fi
+    python3 -c '
+import json,sys
+args=sys.argv[1:]
+cpu_model,cpu_cores,cpu_gov,mem_total,mem_used,swap_used,gpu_driver,gpu_gfx,gpu_temp,gpu_use,npu_driver,npu_device,load1,containers_json,services_json,zenny_running,zenny_models,ollama_running,backend_label,ai_model=args
+d={
+    "cpu":{"model":cpu_model,"cores":int(cpu_cores or 0),"governor":cpu_gov},
+    "ram":{"total_mb":int(mem_total or 0),"used_mb":int(mem_used or 0),"swap_used_mb":int(swap_used or 0)},
+    "gpu":{"driver":gpu_driver,"gfx":gpu_gfx,"temp_c":int(gpu_temp or 0),"util_pct":int(gpu_use or 0)},
+    "npu":{"driver":npu_driver,"device":npu_device},
+    "load":{"1min":float(load1 or 0)},
+    "docker":{"containers":json.loads(containers_json)},
+    "services":json.loads(services_json),
+    "zenny":{"running":zenny_running=="true","models":zenny_models.split(",") if zenny_models else []},
+    "ollama":{"running":ollama_running=="true"},
+    "ai_backend":{"label":backend_label,"model":ai_model}
+}
+print(json.dumps(d,indent=2))
+' \
+    "${D_CPU_MODEL:-unknown}" "${D_CPU_CORES:-0}" "${D_CPU_GOVERNOR:-unknown}" \
+    "${D_MEM_TOTAL_MB:-0}" "${D_MEM_USED_MB:-0}" "${D_SWAP_USED_MB:-0}" \
+    "${D_GPU_DRIVER:-none}" "${D_GPU_GFX:-unknown}" "${D_GPU_TEMP:-0}" "${D_GPU_USE:-0}" \
+    "${D_NPU_DRIVER:-none}" "${D_NPU_DEVICE:-none}" "${load1:-0}" \
+    "$_containers" "$_services" \
+    "${D_ZENNY_RUNNING:-false}" "$(IFS=,; echo "${D_ZENNY_KEYS[*]}")" \
+    "${D_OLLAMA_RUNNING:-false}" "${AI_BACKEND_LABEL:-none}" "${ZMENU_AI_MODEL:-auto}" \
+    2>/dev/null || echo '{}'
+}
+
 # _cc_write_rules — writes context into opencode's rules file for the session
 # OpenCode auto-loads ~/.config/opencode/rules.md as persistent instructions
 _cc_write_rules() {
@@ -309,6 +357,16 @@ $(grep -A3 '^## ' "${ZMENU_WIKI_DIR}/changes.md" | tail -30)"
     local _machine="${ZMENU_MACHINE_LABEL:-$(hostname 2>/dev/null || echo 'this machine')}"
     local _os; _os=$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-Linux}" || uname -sr)
 
+    # Action history — last 10 applied commands for AI context
+    local _action_history=""
+    if [[ -f "$ZMENU_SESSION_LOG" ]]; then
+        _action_history=$(tail -50 "$ZMENU_SESSION_LOG" 2>/dev/null | grep '"action":"apply"' | tail -10 | \
+            python3 -c "import sys,json; [print(f\"- {json.loads(l).get('t','')}  {json.loads(l).get('detail','')}\") for l in sys.stdin]" 2>/dev/null || true)
+    fi
+
+    local _ctx_json
+    _ctx_json=$(_build_context_json 2>/dev/null || echo '{}')
+
     local sys_prompt
     sys_prompt="## MACHINE FACTS — read these first, do not contradict them
 Machine:        ${_machine} — ${_os}
@@ -320,9 +378,18 @@ NPU:            ${_npu_driver}  ${_npu_device}
 AI backend:     ${AI_BACKEND_LABEL}  (model: ${ZMENU_AI_MODEL:-auto})
 RAM used:       ${_mem_used} MB of ${_mem_total} MB
 
+## Structured Data (DO NOT MODIFY THIS JSON BLOCK)
+\`\`\`json
+${_ctx_json}
+\`\`\`
+
 ## Section: ${section_title}
 
 ${scoped_context}
+
+---
+## Recent Actions (what the user already did)
+${_action_history:-(no recent actions)}
 
 ---
 ## Your role
@@ -332,6 +399,8 @@ contradict them or suggest alternatives already present.
 Be concise and direct. Give exact copy-paste commands.
 When the user types 'apply', the last suggestion has been run —
 acknowledge it and advise what to check next.
+If the user already performed an action recently, do not suggest it again —
+instead suggest the NEXT logical step.
 
 ## Rules for reading command output
 - In 'ls -la' output, the number in column 2 of directory entries is the HARD LINK COUNT, not a file count. The file count is the number of non-. and non-.. lines shown.

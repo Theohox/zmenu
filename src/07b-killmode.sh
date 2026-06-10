@@ -21,15 +21,19 @@ _kill_process_menu() {
         k)
             if kill -TERM "$pid" 2>/dev/null; then
                 echo -e "  ${OK}  Sent SIGTERM to ${pname} (pid ${pid})"
+                _session_log "kill" "SIGTERM ${pname} (pid ${pid})" "OK"
             else
                 echo -e "  ${FAIL}  Failed — try SIGKILL or run with sudo"
+                _session_log "kill" "SIGTERM ${pname} (pid ${pid})" "FAIL"
             fi
             ;;
         K)
             if kill -KILL "$pid" 2>/dev/null; then
                 echo -e "  ${OK}  Sent SIGKILL to ${pname} (pid ${pid})"
+                _session_log "kill" "SIGKILL ${pname} (pid ${pid})" "OK"
             else
                 echo -e "  ${FAIL}  Failed — check permissions (maybe root-owned?)"
+                _session_log "kill" "SIGKILL ${pname} (pid ${pid})" "FAIL"
             fi
             ;;
         i|I)
@@ -231,6 +235,7 @@ _kill_groups() {
                         ;;
                 esac
                 echo -e "  ${OK}  ${gname} shutdown signal sent"
+                _session_log "kill_group" "${gname} (${gcount} procs, ${gram}MB)" "OK"
                 sleep 1
             fi
         fi

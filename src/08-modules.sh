@@ -4839,6 +4839,91 @@ _cc_proj_detail() {
 }
 
 # ============================================================
+#  UNIVERSAL SEARCH
+# ============================================================
+
+_search_universal() {
+    header
+    echo -e "${BCYN}┄ SEARCH ───────────────────────────────────────────────${NC}"
+    echo ""
+    printf '  Query: '
+    local query=""
+    IFS= read -r query
+    [[ -z "$query" ]] && return
+    echo ""
+
+    # Processes
+    echo -e "  ${BOLD}Processes:${NC}"
+    ps aux 2>/dev/null | grep -i "$query" | grep -v grep | head -5 | \
+        awk '{printf "    %-12s %5.1f%% %6.0f MB  %s\n", $2, $3, $6/1024, $11}' || true
+    echo ""
+
+    # Services
+    echo -e "  ${BOLD}Services:${NC}"
+    printf '%s\n' "${D_SERVICES[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' || true
+    echo ""
+
+    # Ports
+    echo -e "  ${BOLD}Ports:${NC}"
+    printf '%s\n' "${D_OPEN_PORTS[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' || true
+    echo ""
+
+    # Wiki
+    echo -e "  ${BOLD}Wiki:${NC}"
+    grep -ri "$query" "$ZMENU_WIKI_DIR"/*.md 2>/dev/null | head -5 | sed 's/^/    /' || true
+    echo ""
+
+    # Session history
+    echo -e "  ${BOLD}Recent commands:${NC}"
+    tail -20 "$ZMENU_SESSION_LOG" 2>/dev/null | grep -i "$query" | \
+        python3 -c "import sys,json; [print('    ',json.loads(l).get('t',''),json.loads(l).get('action',''),json.loads(l).get('detail','')) for l in sys.stdin]" 2>/dev/null || true
+    echo ""
+
+    pause
+}
+
+# ============================================================
+#  PER-MENU HELP
+# ============================================================
+
+_menu_help_main() {
+    header
+    echo -e "${BCYN}┄ HELP ─ MAIN MENU ─────────────────────────────────────${NC}"
+    echo ""
+    echo "  1) KILL MODE      — Stop runaway processes. Shows top CPU/RAM"
+    echo "                      consumers with memory and CPU usage."
+    echo "                      Press a number to send SIGTERM, S for SIGKILL."
+    echo ""
+    echo "  2) AI Engine      — Manage inference backends (Zenny-Core,"
+    echo "                      Ollama, OpenCode, LLM-Gateway)."
+    echo "                      Start, stop, load/unload models, benchmark."
+    echo ""
+    echo "  3) Docker         — Start/stop Docker, view containers,"
+    echo "                      prune images, view logs."
+    echo ""
+    echo "  4) System Scan    — Security audit: firewall, ports, VPN,"
+    echo "                      unknown services, telemetry opt-outs."
+    echo ""
+    echo "  5) Hardware       — GPU, NPU, CPU, thermals, power profiles,"
+    echo "                      PCIe info, disk health."
+    echo ""
+    echo "  6) Find Problems  — Automated bottleneck sweep with fixes."
+    echo "                      Press C to Ask AI for deeper analysis."
+    echo ""
+    echo "  7) Projects       — Open projects, create new ones,"
+    echo "                      scaffold AI.md, launch coding sessions."
+    echo ""
+    echo "  8) Settings       — Edit config, check versions, reinstall."
+    echo ""
+    echo "  r) Refresh        — Re-run discovery to update live metrics"
+    echo "  /) Search         — Fuzzy search processes, services, wiki"
+    echo "  E) Export         — Save full markdown report to ~/zmenu-report.md"
+    echo "  q) Exit           — Quit zmenu"
+    echo ""
+    pause
+}
+
+# ============================================================
 #  SECTION 7 — MAIN MENU
 # ============================================================
 
