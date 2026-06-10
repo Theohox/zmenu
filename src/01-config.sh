@@ -47,6 +47,17 @@ EOF
 
 cfg_load() {
     cfg_init
+    # Security: verify config file ownership and permissions before sourcing
+    local _mode _owner
+    _mode=$(stat -c '%a' "$ZMENU_CONFIG_FILE" 2>/dev/null || echo "")
+    _owner=$(stat -c '%u' "$ZMENU_CONFIG_FILE" 2>/dev/null || echo "")
+    if [[ -n "$_mode" && "$_mode" != "600" && "$_mode" != "644" && "$_mode" != "640" ]]; then
+        echo -e "  ${WARN}  Config file permissions ($_mode) are too permissive. Run: chmod 600 $ZMENU_CONFIG_FILE"
+    fi
+    if [[ -n "$_owner" && "$_owner" != "$(id -u)" ]]; then
+        echo -e "  ${FAIL}  Config file is not owned by you. Aborting."
+        return 1
+    fi
     # shellcheck source=/dev/null
     source "$ZMENU_CONFIG_FILE"
     # Propagate config overrides to runtime variables

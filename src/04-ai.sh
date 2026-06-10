@@ -65,7 +65,9 @@ _cc_write_rules() {
     local context="$1"
     local rules_dir="${OPENCODE_CFG}"
     mkdir -p "$rules_dir"
+    chmod 700 "$rules_dir" 2>/dev/null || true
     printf '%s' "$context" > "${rules_dir}/rules.md"
+    chmod 600 "${rules_dir}/rules.md" 2>/dev/null || true
 }
 
 # ============================================================
@@ -81,13 +83,18 @@ _ai_call_zenny() {
     local model="${ZMENU_AI_MODEL:-}"
     [[ -z "$model" && ${#D_ZENNY_KEYS[@]} -gt 0 ]] && model="${D_ZENNY_KEYS[0]}"
     [[ -z "$model" ]] && { echo "[error: no Zenny model available — load one first]"; return 1; }
-    timeout 180 python3 - <<PYEOF 2>/dev/null
-import socket, json, sys
+    # Pass all dynamic data via env vars to avoid heredoc string interpolation (Python injection)
+    ZENNY_HIST_FILE="$hist_file" \
+    ZENNY_MODEL="$model" \
+    ZENNY_SYS_PROMPT="$sys_prompt" \
+    ZENNY_SOCKET="$D_ZENNY_SOCKET" \
+    timeout 180 python3 -c '
+import os, socket, json, sys, re
 
-hist_file = "${hist_file}"
-model     = "${model}"
-# sys_prompt passed inline via heredoc expansion
-sys_prompt = r"""${sys_prompt}"""
+hist_file = os.environ.get("ZENNY_HIST_FILE", "")
+model     = os.environ.get("ZENNY_MODEL", "")
+sys_prompt = os.environ.get("ZENNY_SYS_PROMPT", "")
+socket_path = os.environ.get("ZENNY_SOCKET", "")
 
 try:
     hist = json.load(open(hist_file))
@@ -103,7 +110,7 @@ if prior:
     lines = []
     for m in prior:
         role = "User" if m["role"] == "user" else "Assistant"
-        lines.append(f"{role}: {m['content']}")
+        lines.append(f"{role}: {m[\"content\"]}")
     user_field = "Prior conversation:\n" + "\n".join(lines) + "\n\nCurrent message: " + current_msg
 else:
     user_field = current_msg
@@ -120,7 +127,7 @@ payload = json.dumps({
 try:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(175)
-    s.connect("${D_ZENNY_SOCKET}")
+    s.connect(socket_path)
     s.sendall(payload.encode())
     buf = b""
     while not buf.endswith(b"\n"):
@@ -137,19 +144,18 @@ try:
         else:
             print(f"[error: {err}]", end="")
     else:
-        import re
         content = d.get("content", "[no content field in response]")
         # Strip Qwen3 chain-of-thought — handle closed AND unclosed blocks
         # (unclosed = model hit max_tokens before finishing the think phase)
-        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-        content = re.sub(r'<think>.*$', '', content, flags=re.DOTALL)
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<think>.*$", "", content, flags=re.DOTALL)
         content = content.strip()
         if not content:
             content = "[model hit token limit during thinking — try a shorter prompt or switch to a faster model in Settings → AI Backend]"
         print(content, end="")
 except Exception as e:
     print(f"[error: {e}]", end="")
-PYEOF
+' 2>/dev/null
 }
 
 
@@ -211,7 +217,8 @@ cc_launch() {
 
     if [[ -z "$oc_cmd" ]]; then
         echo -e "  ${FAIL}  OpenCode not found at ${OPENCODE_BIN}"
-        echo -e "  ${DIM}  Install: curl -fsSL https://opencode.ai/install | bash${NC}"
+        echo -e "  ${DIM}  Install: curl -fsSL https://opencode.ai/install -o /tmp/opencode-install.sh${NC}"
+        echo -e "  ${DIM}  Review:  less /tmp/opencode-install.sh && bash /tmp/opencode-install.sh${NC}"
         return 1
     fi
 
@@ -347,10 +354,28 @@ acknowledge it and advise what to check next.
         [[ "$user_input" == "q" || "$user_input" == "quit" ]] && break
         [[ -z "$user_input" ]] && continue
 
-        # Apply last suggestion immediately, no confirmation
+        # Apply last suggestion — preview first, then confirm
         if [[ "$user_input" == "apply" || "$user_input" == "apply that" ]]; then
             echo ""
             if [[ -n "$apply_fn" ]] && declare -f "$apply_fn" >/dev/null 2>&1; then
+                # Extract proposed commands for preview
+                local proposed_cmds
+                proposed_cmds=$(echo "$last_ai_response" | awk '/^```/{p=!p; next} p && /[^[:space:]]/{print}')
+                if [[ -z "$proposed_cmds" ]]; then
+                    proposed_cmds=$(echo "$last_ai_response" | grep -E '^[[:space:]]*(sudo |systemctl |sysctl |docker |pkill |kill |apt |mkdir |rm |cp |mv |chmod |chown |python3 |pip |curl |powerprofilesctl |journalctl |sed |awk |tee |cat |echo |printf |export |unset |git |wget |dmesg |cpupower )')
+                fi
+                if [[ -n "$proposed_cmds" ]]; then
+                    echo -e "  ${BCYN}Commands to execute:${NC}"
+                    echo "$proposed_cmds" | sed 's/^/    /'
+                    echo ""
+                    printf '  Execute these commands? (y/N): '
+                    IFS= read -r _confirm
+                    if [[ ! "$_confirm" =~ ^[Yy]$ ]]; then
+                        echo -e "  ${DIM}Cancelled.${NC}"
+                        echo ""
+                        continue
+                    fi
+                fi
                 echo -e "  ${BCYN}✦ Applying...${NC}"
                 "$apply_fn" "$last_ai_response"
                 echo -e "  ${OK}  Applied."

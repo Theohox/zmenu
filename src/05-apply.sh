@@ -44,6 +44,68 @@ _APPLY_ALLOWED_PREFIXES=(
     sed awk
 )
 
+# ── Safe command execution — replaces eval with direct array expansion ──
+# Parses a command string into an array respecting single/double quotes,
+# then validates no dangerous metacharacters exist before executing.
+_apply_safe_exec() {
+    local cmd="$1"
+    local -a args=()
+    local arg="" in_quote="" ch escaped=false
+
+    # Parse command string into array, respecting quotes
+    for ((i=0; i<${#cmd}; i++)); do
+        ch="${cmd:$i:1}"
+        if $escaped; then
+            arg+="$ch"
+            escaped=false
+            continue
+        fi
+        if [[ "$ch" == "\\" ]]; then
+            escaped=true
+            continue
+        fi
+        if [[ -n "$in_quote" ]]; then
+            if [[ "$ch" == "$in_quote" ]]; then
+                in_quote=""
+            else
+                arg+="$ch"
+            fi
+            continue
+        fi
+        if [[ "$ch" == "'" || "$ch" == '"' ]]; then
+            in_quote="$ch"
+            continue
+        fi
+        if [[ "$ch" == " " || "$ch" == $'\t' ]]; then
+            if [[ -n "$arg" ]]; then
+                args+=("$arg")
+                arg=""
+            fi
+            continue
+        fi
+        arg+="$ch"
+    done
+    [[ -n "$arg" ]] && args+=("$arg")
+
+    # Must have at least one argument
+    if [[ ${#args[@]} -eq 0 ]]; then
+        echo -e "  ${FAIL}  No command to execute"
+        return 1
+    fi
+
+    # Block dangerous metacharacters in any argument
+    local _arg
+    for _arg in "${args[@]}"; do
+        if printf '%s' "$_arg" | grep -qE '[;|&<>$`{}()]'; then
+            echo -e "  ${FAIL}  BLOCKED: argument contains shell metacharacter"
+            return 1
+        fi
+    done
+
+    # Execute safely — no re-parsing, no eval
+    "${args[@]}" 2>/dev/null
+}
+
 # Extract and run AI-suggested commands safely.
 # Priority: fenced code blocks (```...```) → bare allowlisted lines.
 # Usage: _apply_generic "$ai_text" "Section Name"
@@ -106,6 +168,10 @@ _apply_generic() {
         if printf '%s' "$cmd" | grep -qE '\$\(.*\)|`.*`'; then
             _blocked=true; _block_reason="command substitution not allowed (injection risk)"
         fi
+        # Command chaining / piping / redirection
+        if printf '%s' "$cmd" | grep -qE '[;|&>]'; then
+            _blocked=true; _block_reason="command chaining / piping / redirection not allowed"
+        fi
 
         if $_blocked; then
             echo -e "  ${FAIL}  BLOCKED: ${cmd}"
@@ -115,7 +181,7 @@ _apply_generic() {
         fi
 
         echo -e "  ${DIM}Running: ${cmd}${NC}"
-        if eval "$cmd" 2>/dev/null; then
+        if _apply_safe_exec "$cmd"; then
             echo -e "  ${OK}  OK"
             _wiki_log_change "$section" "$cmd" "OK"
         else

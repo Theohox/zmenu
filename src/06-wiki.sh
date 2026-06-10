@@ -123,7 +123,8 @@ _wiki_full_refresh() {
         if [[ -n "$oc_cmd" ]]; then
             printf "Version:    %s\n" "$("$oc_cmd" --version 2>/dev/null || echo '?')"
         fi
-        printf "Install:    curl -fsSL https://opencode.ai/install | bash\n\n"
+        printf "Install:    curl -fsSL https://opencode.ai/install -o /tmp/opencode-install.sh\n"
+        printf "Review:     less /tmp/opencode-install.sh && bash /tmp/opencode-install.sh\n\n"
         printf "## Configuration\n"
         printf "Config dir:  ~/.config/opencode/\n"
         printf "Config file: ~/.config/opencode/opencode.json\n"

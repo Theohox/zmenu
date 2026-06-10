@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  —  Built 2026-06-10 18:11:19
+#  Z-MENU  —  Built 2026-06-10 18:52:07
 #  Auto-generated from src/*.sh — edit sources, not this file
 #  Build: ./build.sh
 # ============================================================
@@ -12,20 +12,21 @@
 
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  v5.12.0
+#  Z-MENU  v5.12.1
 #  Local Sovereign Dashboard
 #
 #  INSTALL:   ./build.sh && sudo cp zmenu.sh /usr/local/bin/zmenu
 #  RUN:       zmenu
 #  HEADLESS:  zmenu --run <function_name>
 #
-#  v5.12.0 — KILL MODE refactor:
-#    • Dashboard home screen with green/yellow/red status at a glance
-#    • Find Problems module — full bottleneck sweep with plain English fixes
-#    • Export from most screens (press E → ~/zmenu-report.md)
-#    • 8 menu sections grouped by what affects what
-#    • Portable — auto-detect hardware, no hardcoded values
-#    • Back buttons + Ask AI on every screen (when AI backend is available)
+#  v5.12.1 — OWASP security hardening:
+#    • Replaced eval with quote-aware safe exec + metacharacter blocking
+#    • Fixed Python heredoc injection (env vars for dynamic data)
+#    • Config file ownership/permission checks before sourcing
+#    • Apply confirmation preview — shows commands, requires y/N
+#    • Error log secret stripping, chmod 600, temp file cleanup trap
+#    • Fixed curl|bash patterns → download-then-review instructions
+#    • Service/file permission hardening (600/700)
 #
 #  Architecture:
 #    1. Config       — ~/.zmenu/config (sourced, user-editable)
@@ -41,7 +42,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.12.0"
+readonly ZMENU_VERSION="5.12.1"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
@@ -73,7 +74,20 @@ WARN="${BYEL}●${NC}"     # attention / degraded / unexpected
 IDLE="${BBLK}○${NC}"     # stopped / installed-not-running / intentionally off
 
 # ── Error trap ─────────────────────────────────────────────
-_on_err() { echo "[$(date '+%H:%M:%S')] ERR line $1: $BASH_COMMAND" >> "$ZMENU_ERROR_LOG"; }
+_on_err() {
+    local _safe_cmd
+    _safe_cmd=$(echo "$BASH_COMMAND" | sed 's/\(token\|key\|password\|secret\|api_key\|auth\)=[^[:space:]]*/\1=***/gi')
+    echo "[$(date '+%H:%M:%S')] ERR line $1: $_safe_cmd" >> "$ZMENU_ERROR_LOG"
+}
+
+# ── Cleanup on exit ────────────────────────────────────────
+_zmenu_cleanup() {
+    rm -f /tmp/zmenu-chat-*.json /tmp/zmenu-session-*.md /tmp/zmenu-ai-apply.txt /tmp/zmenu-bp.txt 2>/dev/null || true
+}
+trap _zmenu_cleanup EXIT
+
+# Ensure error log has restrictive permissions
+touch "$ZMENU_ERROR_LOG" 2>/dev/null && chmod 600 "$ZMENU_ERROR_LOG" 2>/dev/null || true
 
 # ============================================================
 
@@ -130,6 +144,17 @@ EOF
 
 cfg_load() {
     cfg_init
+    # Security: verify config file ownership and permissions before sourcing
+    local _mode _owner
+    _mode=$(stat -c '%a' "$ZMENU_CONFIG_FILE" 2>/dev/null || echo "")
+    _owner=$(stat -c '%u' "$ZMENU_CONFIG_FILE" 2>/dev/null || echo "")
+    if [[ -n "$_mode" && "$_mode" != "600" && "$_mode" != "644" && "$_mode" != "640" ]]; then
+        echo -e "  ${WARN}  Config file permissions ($_mode) are too permissive. Run: chmod 600 $ZMENU_CONFIG_FILE"
+    fi
+    if [[ -n "$_owner" && "$_owner" != "$(id -u)" ]]; then
+        echo -e "  ${FAIL}  Config file is not owned by you. Aborting."
+        return 1
+    fi
     # shellcheck source=/dev/null
     source "$ZMENU_CONFIG_FILE"
     # Propagate config overrides to runtime variables
@@ -328,24 +353,28 @@ _disc_ollama() {
 _zenny_send() {
     local msg="$1"
     # Guard against hangs: stale socket or unresponsive server
-    timeout 5 python3 - <<PYEOF 2>/dev/null
-import socket, sys
-req = """${msg}""" + "\n"
+    # Pass message via stdin to avoid heredoc string interpolation (Python injection)
+    printf '%s\n' "$msg" | timeout 5 python3 -c '
+import sys, socket
+req = sys.stdin.read()
+if not req.endswith("\n"):
+    req += "\n"
 try:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(4)
-    s.connect("${D_ZENNY_SOCKET}")
+    s.connect(sys.argv[1])
     s.sendall(req.encode())
     buf = b""
     while not buf.endswith(b"\n"):
         chunk = s.recv(4096)
-        if not chunk: break
+        if not chunk:
+            break
         buf += chunk
     s.close()
     print(buf.decode().strip())
 except Exception:
     sys.exit(1)
-PYEOF
+' "$D_ZENNY_SOCKET" 2>/dev/null
 }
 
 # ── Zenny-Core ─────────────────────────────────────────────
@@ -1011,7 +1040,9 @@ _cc_write_rules() {
     local context="$1"
     local rules_dir="${OPENCODE_CFG}"
     mkdir -p "$rules_dir"
+    chmod 700 "$rules_dir" 2>/dev/null || true
     printf '%s' "$context" > "${rules_dir}/rules.md"
+    chmod 600 "${rules_dir}/rules.md" 2>/dev/null || true
 }
 
 # ============================================================
@@ -1027,13 +1058,18 @@ _ai_call_zenny() {
     local model="${ZMENU_AI_MODEL:-}"
     [[ -z "$model" && ${#D_ZENNY_KEYS[@]} -gt 0 ]] && model="${D_ZENNY_KEYS[0]}"
     [[ -z "$model" ]] && { echo "[error: no Zenny model available — load one first]"; return 1; }
-    timeout 180 python3 - <<PYEOF 2>/dev/null
-import socket, json, sys
+    # Pass all dynamic data via env vars to avoid heredoc string interpolation (Python injection)
+    ZENNY_HIST_FILE="$hist_file" \
+    ZENNY_MODEL="$model" \
+    ZENNY_SYS_PROMPT="$sys_prompt" \
+    ZENNY_SOCKET="$D_ZENNY_SOCKET" \
+    timeout 180 python3 -c '
+import os, socket, json, sys, re
 
-hist_file = "${hist_file}"
-model     = "${model}"
-# sys_prompt passed inline via heredoc expansion
-sys_prompt = r"""${sys_prompt}"""
+hist_file = os.environ.get("ZENNY_HIST_FILE", "")
+model     = os.environ.get("ZENNY_MODEL", "")
+sys_prompt = os.environ.get("ZENNY_SYS_PROMPT", "")
+socket_path = os.environ.get("ZENNY_SOCKET", "")
 
 try:
     hist = json.load(open(hist_file))
@@ -1049,7 +1085,7 @@ if prior:
     lines = []
     for m in prior:
         role = "User" if m["role"] == "user" else "Assistant"
-        lines.append(f"{role}: {m['content']}")
+        lines.append(f"{role}: {m[\"content\"]}")
     user_field = "Prior conversation:\n" + "\n".join(lines) + "\n\nCurrent message: " + current_msg
 else:
     user_field = current_msg
@@ -1066,7 +1102,7 @@ payload = json.dumps({
 try:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(175)
-    s.connect("${D_ZENNY_SOCKET}")
+    s.connect(socket_path)
     s.sendall(payload.encode())
     buf = b""
     while not buf.endswith(b"\n"):
@@ -1083,19 +1119,18 @@ try:
         else:
             print(f"[error: {err}]", end="")
     else:
-        import re
         content = d.get("content", "[no content field in response]")
         # Strip Qwen3 chain-of-thought — handle closed AND unclosed blocks
         # (unclosed = model hit max_tokens before finishing the think phase)
-        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-        content = re.sub(r'<think>.*$', '', content, flags=re.DOTALL)
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+        content = re.sub(r"<think>.*$", "", content, flags=re.DOTALL)
         content = content.strip()
         if not content:
             content = "[model hit token limit during thinking — try a shorter prompt or switch to a faster model in Settings → AI Backend]"
         print(content, end="")
 except Exception as e:
     print(f"[error: {e}]", end="")
-PYEOF
+' 2>/dev/null
 }
 
 
@@ -1157,7 +1192,8 @@ cc_launch() {
 
     if [[ -z "$oc_cmd" ]]; then
         echo -e "  ${FAIL}  OpenCode not found at ${OPENCODE_BIN}"
-        echo -e "  ${DIM}  Install: curl -fsSL https://opencode.ai/install | bash${NC}"
+        echo -e "  ${DIM}  Install: curl -fsSL https://opencode.ai/install -o /tmp/opencode-install.sh${NC}"
+        echo -e "  ${DIM}  Review:  less /tmp/opencode-install.sh && bash /tmp/opencode-install.sh${NC}"
         return 1
     fi
 
@@ -1293,10 +1329,28 @@ acknowledge it and advise what to check next.
         [[ "$user_input" == "q" || "$user_input" == "quit" ]] && break
         [[ -z "$user_input" ]] && continue
 
-        # Apply last suggestion immediately, no confirmation
+        # Apply last suggestion — preview first, then confirm
         if [[ "$user_input" == "apply" || "$user_input" == "apply that" ]]; then
             echo ""
             if [[ -n "$apply_fn" ]] && declare -f "$apply_fn" >/dev/null 2>&1; then
+                # Extract proposed commands for preview
+                local proposed_cmds
+                proposed_cmds=$(echo "$last_ai_response" | awk '/^```/{p=!p; next} p && /[^[:space:]]/{print}')
+                if [[ -z "$proposed_cmds" ]]; then
+                    proposed_cmds=$(echo "$last_ai_response" | grep -E '^[[:space:]]*(sudo |systemctl |sysctl |docker |pkill |kill |apt |mkdir |rm |cp |mv |chmod |chown |python3 |pip |curl |powerprofilesctl |journalctl |sed |awk |tee |cat |echo |printf |export |unset |git |wget |dmesg |cpupower )')
+                fi
+                if [[ -n "$proposed_cmds" ]]; then
+                    echo -e "  ${BCYN}Commands to execute:${NC}"
+                    echo "$proposed_cmds" | sed 's/^/    /'
+                    echo ""
+                    printf '  Execute these commands? (y/N): '
+                    IFS= read -r _confirm
+                    if [[ ! "$_confirm" =~ ^[Yy]$ ]]; then
+                        echo -e "  ${DIM}Cancelled.${NC}"
+                        echo ""
+                        continue
+                    fi
+                fi
                 echo -e "  ${BCYN}✦ Applying...${NC}"
                 "$apply_fn" "$last_ai_response"
                 echo -e "  ${OK}  Applied."
@@ -1424,6 +1478,68 @@ _APPLY_ALLOWED_PREFIXES=(
     sed awk
 )
 
+# ── Safe command execution — replaces eval with direct array expansion ──
+# Parses a command string into an array respecting single/double quotes,
+# then validates no dangerous metacharacters exist before executing.
+_apply_safe_exec() {
+    local cmd="$1"
+    local -a args=()
+    local arg="" in_quote="" ch escaped=false
+
+    # Parse command string into array, respecting quotes
+    for ((i=0; i<${#cmd}; i++)); do
+        ch="${cmd:$i:1}"
+        if $escaped; then
+            arg+="$ch"
+            escaped=false
+            continue
+        fi
+        if [[ "$ch" == "\\" ]]; then
+            escaped=true
+            continue
+        fi
+        if [[ -n "$in_quote" ]]; then
+            if [[ "$ch" == "$in_quote" ]]; then
+                in_quote=""
+            else
+                arg+="$ch"
+            fi
+            continue
+        fi
+        if [[ "$ch" == "'" || "$ch" == '"' ]]; then
+            in_quote="$ch"
+            continue
+        fi
+        if [[ "$ch" == " " || "$ch" == $'\t' ]]; then
+            if [[ -n "$arg" ]]; then
+                args+=("$arg")
+                arg=""
+            fi
+            continue
+        fi
+        arg+="$ch"
+    done
+    [[ -n "$arg" ]] && args+=("$arg")
+
+    # Must have at least one argument
+    if [[ ${#args[@]} -eq 0 ]]; then
+        echo -e "  ${FAIL}  No command to execute"
+        return 1
+    fi
+
+    # Block dangerous metacharacters in any argument
+    local _arg
+    for _arg in "${args[@]}"; do
+        if printf '%s' "$_arg" | grep -qE '[;|&<>$`{}()]'; then
+            echo -e "  ${FAIL}  BLOCKED: argument contains shell metacharacter"
+            return 1
+        fi
+    done
+
+    # Execute safely — no re-parsing, no eval
+    "${args[@]}" 2>/dev/null
+}
+
 # Extract and run AI-suggested commands safely.
 # Priority: fenced code blocks (```...```) → bare allowlisted lines.
 # Usage: _apply_generic "$ai_text" "Section Name"
@@ -1486,6 +1602,10 @@ _apply_generic() {
         if printf '%s' "$cmd" | grep -qE '\$\(.*\)|`.*`'; then
             _blocked=true; _block_reason="command substitution not allowed (injection risk)"
         fi
+        # Command chaining / piping / redirection
+        if printf '%s' "$cmd" | grep -qE '[;|&>]'; then
+            _blocked=true; _block_reason="command chaining / piping / redirection not allowed"
+        fi
 
         if $_blocked; then
             echo -e "  ${FAIL}  BLOCKED: ${cmd}"
@@ -1495,7 +1615,7 @@ _apply_generic() {
         fi
 
         echo -e "  ${DIM}Running: ${cmd}${NC}"
-        if eval "$cmd" 2>/dev/null; then
+        if _apply_safe_exec "$cmd"; then
             echo -e "  ${OK}  OK"
             _wiki_log_change "$section" "$cmd" "OK"
         else
@@ -1944,7 +2064,8 @@ _wiki_full_refresh() {
         if [[ -n "$oc_cmd" ]]; then
             printf "Version:    %s\n" "$("$oc_cmd" --version 2>/dev/null || echo '?')"
         fi
-        printf "Install:    curl -fsSL https://opencode.ai/install | bash\n\n"
+        printf "Install:    curl -fsSL https://opencode.ai/install -o /tmp/opencode-install.sh\n"
+        printf "Review:     less /tmp/opencode-install.sh && bash /tmp/opencode-install.sh\n\n"
         printf "## Configuration\n"
         printf "Config dir:  ~/.config/opencode/\n"
         printf "Config file: ~/.config/opencode/opencode.json\n"
@@ -4444,6 +4565,7 @@ Environment=RUST_LOG=zenny_core=info
 [Install]
 WantedBy=default.target
 SVCEOF
+    sudo chmod 600 "$_ZENNY_SERVICE_FILE"
     sudo systemctl daemon-reload
     sudo systemctl enable "$_ZENNY_SERVICE"
     sudo systemctl start  "$_ZENNY_SERVICE"
@@ -4570,7 +4692,8 @@ _ai_sub_opencode() {
             echo -e "  Binary:   ${DIM}${oc_cmd}${NC}"
         else
             echo -e "  Status:   ${FAIL} not installed"
-            echo -e "  Install:  ${DIM}curl -fsSL https://opencode.ai/install | bash${NC}"
+            echo -e "  Install:  ${DIM}curl -fsSL https://opencode.ai/install -o /tmp/opencode-install.sh${NC}"
+            echo -e "  Review:   ${DIM}less /tmp/opencode-install.sh && bash /tmp/opencode-install.sh${NC}"
         fi
         echo ""
         echo -e "  ${DIM}Config:   ${OPENCODE_CFG}/opencode.json${NC}"

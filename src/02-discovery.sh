@@ -180,24 +180,28 @@ _disc_ollama() {
 _zenny_send() {
     local msg="$1"
     # Guard against hangs: stale socket or unresponsive server
-    timeout 5 python3 - <<PYEOF 2>/dev/null
-import socket, sys
-req = """${msg}""" + "\n"
+    # Pass message via stdin to avoid heredoc string interpolation (Python injection)
+    printf '%s\n' "$msg" | timeout 5 python3 -c '
+import sys, socket
+req = sys.stdin.read()
+if not req.endswith("\n"):
+    req += "\n"
 try:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(4)
-    s.connect("${D_ZENNY_SOCKET}")
+    s.connect(sys.argv[1])
     s.sendall(req.encode())
     buf = b""
     while not buf.endswith(b"\n"):
         chunk = s.recv(4096)
-        if not chunk: break
+        if not chunk:
+            break
         buf += chunk
     s.close()
     print(buf.decode().strip())
 except Exception:
     sys.exit(1)
-PYEOF
+' "$D_ZENNY_SOCKET" 2>/dev/null
 }
 
 # ── Zenny-Core ─────────────────────────────────────────────

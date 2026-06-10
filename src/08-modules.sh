@@ -1162,6 +1162,7 @@ Environment=RUST_LOG=zenny_core=info
 [Install]
 WantedBy=default.target
 SVCEOF
+    sudo chmod 600 "$_ZENNY_SERVICE_FILE"
     sudo systemctl daemon-reload
     sudo systemctl enable "$_ZENNY_SERVICE"
     sudo systemctl start  "$_ZENNY_SERVICE"
@@ -1288,7 +1289,8 @@ _ai_sub_opencode() {
             echo -e "  Binary:   ${DIM}${oc_cmd}${NC}"
         else
             echo -e "  Status:   ${FAIL} not installed"
-            echo -e "  Install:  ${DIM}curl -fsSL https://opencode.ai/install | bash${NC}"
+            echo -e "  Install:  ${DIM}curl -fsSL https://opencode.ai/install -o /tmp/opencode-install.sh${NC}"
+            echo -e "  Review:   ${DIM}less /tmp/opencode-install.sh && bash /tmp/opencode-install.sh${NC}"
         fi
         echo ""
         echo -e "  ${DIM}Config:   ${OPENCODE_CFG}/opencode.json${NC}"
