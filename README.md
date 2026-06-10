@@ -4,7 +4,7 @@ A single-file bash CLI dashboard for AMD Strix Halo laptops running Ubuntu 24.04
 No cloud dependency, no telemetry, no install script — one file, dropped in `/usr/local/bin`.
 
 **Tested on:** HP ZBook Ultra 14 G1a · AMD Ryzen AI MAX+ PRO 395 · Radeon 8060S (gfx1151) · Ubuntu 24.04 LTS  
-**Version:** 5.12.0
+**Version:** 5.13.2
 
 ---
 
@@ -17,6 +17,8 @@ leaves, no vendor lock-in.
 
 Every feature works standalone. No external services required.
 
+New in v5.13: **time-series history**, **trend indicators**, **ASCII sparklines**, **background watch mode**, **universal search**, **per-menu help**, and **structured AI context**.
+
 ---
 
 ## Architecture
@@ -27,24 +29,24 @@ zmenu is built from modular source files in `src/`:
 
 ```
 src/
-  00-header.sh        # version, globals, colours
-  01-config.sh        # config init/load/edit
-  02-discovery.sh     # all system probes (D_* variables)
+  00-header.sh        # version, globals, colours, cleanup traps
+  01-config.sh        # config init/load/edit with permission checks
+  02-discovery.sh     # all system probes (D_* variables) + history engine
   03-context.sh       # live context generator for AI
-  04-ai.sh            # AI backend launcher
-  05-apply.sh         # apply engine (safe command execution)
+  04-ai.sh            # AI backend launcher + structured JSON context
+  05-apply.sh         # safe apply engine (quote-aware, no eval)
   06-wiki.sh          # persistent wiki generation
-  07-chrome.sh        # UI chrome: header, dashboard, pause, export
+  07-chrome.sh        # UI chrome: header, dashboard, sparklines, export
   07b-killmode.sh     # KILL MODE task manager
-  08-modules.sh       # all menu modules
+  08-modules.sh       # all menu modules + search + help
   08b-diagnostics.sh  # kworker storm, external tools, sensors
-  09-main.sh          # main menu loop + entrypoint
+  09-main.sh          # main menu loop + entrypoint + watch mode
 ```
 
 Run `./build.sh` to concatenate all sources into `zmenu.sh`. The built file is what gets installed
-to `/usr/local/bin/zmenu`.
+to `/usr/local/bin/zmenu`. Build includes automated navigation validation.
 
-### Two Layers
+### Three Layers
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -55,6 +57,13 @@ to `/usr/local/bin/zmenu`.
 └────────────────────────┬────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────┐
+│  History (~/.zmenu/history/*.jsonl)                      │
+│  Time-series metrics + session command logs. Enables     │
+│  trend detection, sparklines, and post-incident review.  │
+│  Auto-rotates daily, compresses after 7 days.            │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
 │  Wiki (~/.zmenu/wiki/*.md)                               │
 │  Persistent, structured knowledge about THIS machine.    │
 │  Generated from discovery. Grows over time as you        │
@@ -62,7 +71,7 @@ to `/usr/local/bin/zmenu`.
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Key principle:** shell commands discover facts, the wiki stores them. No hardcoded package knowledge.
+**Key principle:** shell commands discover facts, history remembers trends, the wiki stores knowledge. No hardcoded package knowledge.
 If it's installed, discovery finds it.
 
 ---
@@ -74,10 +83,18 @@ required** — all dashboard features work standalone.
 
 | Tool | Discovery | Notes |
 |------|-----------|-------|
-| **Ollama** | Port 11434 + process check | Primary supported backend |
+| **Zenny-Core** | `~/.local/bin/zenny-core` + socket | Primary GPU-accelerated inference backend |
+| **Ollama** | Port 11434 + process check | Alternative backend with broader model support |
 | **OpenCode** | `~/.opencode/bin/opencode` | TUI coding agent |
 | **LM Studio** | Port 1234 | Monitored only (status, model dir size) |
 | **Claude Code** | `claude` on `$PATH` | Discovered as installed app only |
+| **LLM-Gateway** | Port 8090 | Local gateway for model routing |
+
+### Zenny-Core
+
+Zenny-Core is the recommended inference backend for zmenu. It runs as a Unix socket server
+(`/tmp/zenny-core.sock`) and provides fast GPU-accelerated inference with automatic model
+loading/unloading. The AI Engine menu can start, stop, load models, and run benchmarks.
 
 ### Ollama on Strix Halo
 
@@ -88,6 +105,38 @@ override to the systemd service file for you.
 ---
 
 ## Feature Modules
+
+### Dashboard — At a Glance
+
+The home screen shows live system status with **trend indicators** and **sparklines**:
+
+```
+GPU       ●  gfx1151  52°C ▲(+3°C)  3%
+      ▅▅█▅▅▅▅▅▆▆
+
+Load      ●  1.24 0.81 0.58  ▲(+1) (32 threads)
+      ▁▁▁▁██▁▁▁█
+
+Memory Pool    ●  9187/128075 MB used ▼(-5MB) ·  118888 MB available
+      ▃▃█▃▃▃▃▃▃▃
+```
+
+- **Trend arrows** ▲▼ show 5-minute delta for GPU temp, RAM, and load
+- **Sparklines** show the last 30 data points as ASCII mini-charts
+- **Recently used** menu items appear at the top for quick re-access
+- **Green/yellow/red** status dots at a glance for every subsystem
+
+### Global Shortcuts
+
+From any screen:
+
+| Key | Action |
+|-----|--------|
+| `r` | Refresh discovery |
+| `/` | Universal search (processes, services, ports, wiki, history) |
+| `?` | Context-sensitive help |
+| `E` | Export markdown report |
+| `q` | Quit zmenu |
 
 ### 1) KILL MODE — Stop the Bullshit
 The first thing you see when your machine is melting. A proper task manager:
@@ -101,6 +150,14 @@ Every screen gives you actions. No dead ends.
 
 ### 2) AI Engine
 Optional management panel for local inference tools:
+
+**Zenny-Core sub-menu:**
+- Start / stop Zenny-Core daemon
+- Load / unload models
+- Live stats: tok/s, loaded models, VRAM usage
+- Benchmark any loaded model
+- Rescan model registry
+- Install as systemd service
 
 **Ollama sub-menu:**
 - Start / stop Ollama
@@ -147,7 +204,7 @@ Registry-driven inventory of every tool and service on the machine:
 - Unknown processes scan — processes not in the registry, risk-tiered
 - Export full scan report to markdown
 
-Default registry includes: Ollama, LM Studio, Claude Code, OpenCode, Lemonade, Hermes,
+Default registry includes: Zenny-Core, Ollama, LM Studio, Claude Code, OpenCode, Lemonade, Hermes,
 Open WebUI, Crawl4AI, n8n, SearXNG, Tailscale, OpenVPN, Docker, Node.js, Python3, Rust/Cargo, pip3.
 
 Adding a new app: one line in the `_SCAN_REGISTRY` array. Scanner and wiki pick it up automatically.
@@ -195,23 +252,90 @@ Project-aware workspace:
 
 ## Apply Engine
 
-When using an AI backend (Ollama), you can type `apply` after the AI gives a suggestion, and
+When using an AI backend (Zenny-Core), you can type `apply` after the AI gives a suggestion, and
 zmenu extracts the shell commands from the AI's last response and runs them.
 
-**Safety model (allowlist):**
-Only these command prefixes may be extracted and executed:
-`sudo`, `systemctl`, `sysctl`, `docker`, `pkill`, `kill`, `killall`, `apt`, `apt-get`, `snap`,
-`mkdir`, `rm`, `cp`, `mv`, `chmod`, `chown`, `ln`, `tee`, `cat`, `echo`, `printf`, `export`, `unset`,
-`python3`, `pip`, `pip3`, `curl`, `wget`, `powerprofilesctl`, `cpupower`, `journalctl`, `dmesg`,
-`git`, `sed`, `awk`
+**Safety model:**
+- **Quote-aware parser** — respects single and double quotes, no `eval`
+- **Metacharacter blocking** — commands containing `; | & < > $ \\\` { } ( )` are rejected
+- **Allowlist** — only these prefixes may be executed:
+  `sudo`, `systemctl`, `sysctl`, `docker`, `pkill`, `kill`, `killall`, `apt`, `apt-get`, `snap`,
+  `mkdir`, `rm`, `cp`, `mv`, `chmod`, `chown`, `ln`, `tee`, `cat`, `echo`, `printf`, `export`, `unset`,
+  `python3`, `pip`, `pip3`, `curl`, `wget`, `powerprofilesctl`, `cpupower`, `journalctl`, `dmesg`,
+  `git`, `sed`, `awk`
 
 **Hard blocks regardless of context:**
 - Any command targeting `zmenu`, `bash`, or the current shell PID
 - Re-launching zmenu from inside apply
 - `rm -rf` on any root path (destructive)
 - Commands with `$(...)` or backtick substitution (injection risk)
+- Command chaining / piping / redirection
+
+**Confirmation preview:** Before running extracted commands, zmenu shows them and requires an
+explicit `y` confirmation.
 
 After apply runs, the wiki's `changes.md` is updated.
+
+---
+
+## History & Persistence
+
+zmenu now keeps time-series history and a session audit log:
+
+### Metrics History
+Every discovery run appends a JSONL record to `~/.zmenu/history/metrics.YYYYMMDD.jsonl`:
+
+```jsonl
+{"t":"2026-06-10T19:26:36","gpu_temp":72,"gpu_use":45,"ram_used_mb":28160,"load1":2.4,"docker_containers":3}
+```
+
+- Auto-rotates daily
+- Compresses with gzip after 7 days
+- Deletes gzipped files after 90 days
+- Powers the dashboard sparklines and trend indicators
+
+### Session Command Log
+Every menu selection, kill, and apply action is logged to `~/.zmenu/history/commands.jsonl`:
+
+```jsonl
+{"t": "2026-06-10T19:25:12", "action": "apply", "detail": "sudo sysctl vm.swappiness=10", "result": "OK"}
+```
+
+This enables accountability, reproducibility, and the "recently used" dashboard feature.
+
+---
+
+## Background Watch Mode
+
+Run zmenu as a lightweight background monitor:
+
+```bash
+zmenu --watch
+```
+
+Checks every 30 seconds (configurable) and emits desktop notifications when thresholds are crossed:
+
+| Threshold | Default | Config key |
+|-----------|---------|------------|
+| GPU temperature | 85°C | `ZMENU_ALERT_GPU_TEMP` |
+| RAM usage | 90% | `ZMENU_ALERT_RAM_PERCENT` |
+| Swap usage | 500 MB | `ZMENU_ALERT_SWAP_MB` |
+| Load average | 2× core count | `ZMENU_ALERT_LOAD_MULTIPLIER` |
+
+10-minute cooldown per alert type prevents notification spam.
+
+---
+
+## Security
+
+zmenu is designed with defense in depth:
+
+- **No `eval`** — apply engine uses quote-aware parsing + direct array execution
+- **No shell injection in AI calls** — Python heredocs use stdin/env vars, not inline interpolation
+- **Config file permission checks** — refuses to source files with overly permissive permissions or wrong ownership
+- **Error log secret stripping** — `token`, `key`, `password`, `secret`, `api_key`, `auth` values are redacted
+- **Restrictive file permissions** — error log is `chmod 600`, history directory is `700`
+- **Temp file cleanup** — automatic trap on `EXIT` removes chat/session temp files
 
 ---
 
@@ -243,12 +367,18 @@ Config and wiki are created on first run at `~/.zmenu/`.
 # Interactive TUI (default)
 zmenu
 
+# Background monitoring with threshold alerts
+zmenu --watch
+
 # Run a specific function headlessly (no TUI, outputs to stdout)
 zmenu --run <function_name>
 # Example: zmenu --run mod_hardware
 
 # Dump the current system context to stdout (for debugging AI prompts)
 zmenu --context
+
+# Generate markdown report to ~/zmenu-report.md
+zmenu --export
 ```
 
 ### Prerequisites
@@ -262,7 +392,8 @@ zmenu --context
 - `htop`, `smartmontools`, `lshw`
 
 **Optional AI tools** (not required for any dashboard feature):
-- Ollama (ROCm or CPU inference)
+- Zenny-Core (primary GPU inference backend)
+- Ollama (alternative backend)
 - OpenCode (TUI coding agent)
 
 ---
@@ -272,8 +403,11 @@ zmenu --context
 `~/.zmenu/config` is created on first run. Key settings:
 
 ```bash
-# AI backend: auto | opencode | ollama
+# AI backend: auto | zenny | opencode | ollama
 ZMENU_AI_BACKEND="auto"
+
+# Zenny-Core binary path
+ZMENU_ZENNY_BINARY="${HOME}/.local/bin/zenny-core"
 
 # GPU gfx ID override — required if rocminfo reports wrong ID
 # Strix Halo: rocminfo reports gfx1100, real die is gfx1151
@@ -285,7 +419,7 @@ ZMENU_MACHINE_LABEL="My Strix Halo Box"
 # Projects directory scanned by the Projects module
 ZMENU_PROJECTS_DIR="${HOME}/projects"
 
-# Context window size for AI sessions (when Ollama is used)
+# Context window size for AI sessions
 ZMENU_AI_CONTEXT_LENGTH=8192
 
 # Preferred text editor
@@ -293,6 +427,16 @@ ZMENU_PREFERRED_EDITOR="${VISUAL:-${EDITOR:-nano}}"
 
 # Headless mode (set to 1 for non-TTY environments, auto-set by --run)
 ZMENU_HEADLESS=0
+
+# ── Background Watch Mode ──────────────────────────────────
+ZMENU_WATCH_INTERVAL=30
+ZMENU_ALERT_GPU_TEMP=85
+ZMENU_ALERT_RAM_PERCENT=90
+ZMENU_ALERT_SWAP_MB=500
+ZMENU_ALERT_LOAD_MULTIPLIER=2
+
+# ── Dashboard Sparklines ───────────────────────────────────
+ZMENU_SPARKLINE_POINTS=30
 ```
 
 ---
