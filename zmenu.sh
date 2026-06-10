@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  —  Built 2026-06-10 19:30:25
+#  Z-MENU  —  Built 2026-06-10 19:40:16
 #  Auto-generated from src/*.sh — edit sources, not this file
 #  Build: ./build.sh
 # ============================================================
@@ -12,7 +12,7 @@
 
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  v5.13.1
+#  Z-MENU  v5.13.2
 #  Local Sovereign Dashboard
 #
 #  INSTALL:   ./build.sh && sudo cp zmenu.sh /usr/local/bin/zmenu
@@ -43,7 +43,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.13.1"
+readonly ZMENU_VERSION="5.13.2"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
@@ -3020,7 +3020,16 @@ _session_log() {
     local detail="${2:-}"
     local result="${3:-}"
     mkdir -p "$ZMENU_HISTORY_DIR"
-    printf '%s\n' "{\"t\":\"$(date -Iseconds)\",\"action\":\"${action}\",\"detail\":\"${detail}\",\"result\":\"${result}\"}" >> "$ZMENU_SESSION_LOG"
+    # Use Python to generate valid JSON — prevents injection if detail/result contain quotes/newlines
+    _SL_T="$(date -Iseconds)" \
+    _SL_A="$action" \
+    _SL_D="$detail" \
+    _SL_R="$result" \
+    python3 -c '
+import json,os
+record={"t":os.environ.get("_SL_T",""),"action":os.environ.get("_SL_A",""),"detail":os.environ.get("_SL_D",""),"result":os.environ.get("_SL_R","")}
+print(json.dumps(record))
+' >> "$ZMENU_SESSION_LOG"
     chmod 600 "$ZMENU_SESSION_LOG" 2>/dev/null || true
 }
 
@@ -8645,10 +8654,15 @@ main_menu() {
 
 _watch_check_thresholds() {
     local alerts=""
-    [[ "${D_GPU_TEMP:-0}" -gt "${ZMENU_ALERT_GPU_TEMP:-85}" ]] && \
+    # GPU temp: strip decimal before integer comparison
+    local _gpu_temp_int="${D_GPU_TEMP:-0}"
+    _gpu_temp_int="${_gpu_temp_int%%.*}"
+    [[ "$_gpu_temp_int" -gt "${ZMENU_ALERT_GPU_TEMP:-85}" ]] && \
         alerts+="GPU temp: ${D_GPU_TEMP}°C (threshold: ${ZMENU_ALERT_GPU_TEMP:-85}°C)\n"
     local ram_pct=0
-    [[ "${D_MEM_TOTAL_MB:-0}" -gt 0 ]] && ram_pct=$((D_MEM_USED_MB * 100 / D_MEM_TOTAL_MB))
+    local _mem_total="${D_MEM_TOTAL_MB:-0}"
+    local _mem_used="${D_MEM_USED_MB:-0}"
+    [[ "$_mem_total" -gt 0 ]] && ram_pct=$((_mem_used * 100 / _mem_total))
     [[ "$ram_pct" -gt "${ZMENU_ALERT_RAM_PERCENT:-90}" ]] && \
         alerts+="RAM usage: ${ram_pct}% (threshold: ${ZMENU_ALERT_RAM_PERCENT:-90}%)\n"
     [[ "${D_SWAP_USED_MB:-0}" -gt "${ZMENU_ALERT_SWAP_MB:-500}" ]] && \

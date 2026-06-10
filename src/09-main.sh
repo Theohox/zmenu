@@ -41,10 +41,15 @@ main_menu() {
 
 _watch_check_thresholds() {
     local alerts=""
-    [[ "${D_GPU_TEMP:-0}" -gt "${ZMENU_ALERT_GPU_TEMP:-85}" ]] && \
+    # GPU temp: strip decimal before integer comparison
+    local _gpu_temp_int="${D_GPU_TEMP:-0}"
+    _gpu_temp_int="${_gpu_temp_int%%.*}"
+    [[ "$_gpu_temp_int" -gt "${ZMENU_ALERT_GPU_TEMP:-85}" ]] && \
         alerts+="GPU temp: ${D_GPU_TEMP}°C (threshold: ${ZMENU_ALERT_GPU_TEMP:-85}°C)\n"
     local ram_pct=0
-    [[ "${D_MEM_TOTAL_MB:-0}" -gt 0 ]] && ram_pct=$((D_MEM_USED_MB * 100 / D_MEM_TOTAL_MB))
+    local _mem_total="${D_MEM_TOTAL_MB:-0}"
+    local _mem_used="${D_MEM_USED_MB:-0}"
+    [[ "$_mem_total" -gt 0 ]] && ram_pct=$((_mem_used * 100 / _mem_total))
     [[ "$ram_pct" -gt "${ZMENU_ALERT_RAM_PERCENT:-90}" ]] && \
         alerts+="RAM usage: ${ram_pct}% (threshold: ${ZMENU_ALERT_RAM_PERCENT:-90}%)\n"
     [[ "${D_SWAP_USED_MB:-0}" -gt "${ZMENU_ALERT_SWAP_MB:-500}" ]] && \

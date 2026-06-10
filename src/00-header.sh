@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  v5.13.1
+#  Z-MENU  v5.13.2
 #  Local Sovereign Dashboard
 #
 #  INSTALL:   ./build.sh && sudo cp zmenu.sh /usr/local/bin/zmenu
@@ -31,7 +31,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.13.1"
+readonly ZMENU_VERSION="5.13.2"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 

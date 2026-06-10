@@ -34,7 +34,16 @@ _session_log() {
     local detail="${2:-}"
     local result="${3:-}"
     mkdir -p "$ZMENU_HISTORY_DIR"
-    printf '%s\n' "{\"t\":\"$(date -Iseconds)\",\"action\":\"${action}\",\"detail\":\"${detail}\",\"result\":\"${result}\"}" >> "$ZMENU_SESSION_LOG"
+    # Use Python to generate valid JSON — prevents injection if detail/result contain quotes/newlines
+    _SL_T="$(date -Iseconds)" \
+    _SL_A="$action" \
+    _SL_D="$detail" \
+    _SL_R="$result" \
+    python3 -c '
+import json,os
+record={"t":os.environ.get("_SL_T",""),"action":os.environ.get("_SL_A",""),"detail":os.environ.get("_SL_D",""),"result":os.environ.get("_SL_R","")}
+print(json.dumps(record))
+' >> "$ZMENU_SESSION_LOG"
     chmod 600 "$ZMENU_SESSION_LOG" 2>/dev/null || true
 }
 
