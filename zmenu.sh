@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  —  Built 2026-06-11 01:28:58
+#  Z-MENU  —  Built 2026-06-11 08:13:36
 #  Auto-generated from src/*.sh — edit sources, not this file
 #  Build: ./build.sh
 # ============================================================
@@ -43,7 +43,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.13.4"
+readonly ZMENU_VERSION="5.13.5"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
@@ -253,6 +253,29 @@ D_HERMES_DESKTOP_PID=""
 D_HERMES_CLI_PID=""
 D_HERMES_GATEWAY_PID=""
 
+# ── Port→Process collision registry ──────────────────────
+# Built once at discovery start. Maps "port" → "process_name".
+# Used by ALL port-based discovery to avoid false positives.
+D_PORT_OWNER_MAP=()         # "port|process_name"
+
+# ── Expanded AI infrastructure discovery ─────────────────
+D_LITELLM_RUNNING=false
+D_LITELLM_URL=""
+D_VLLM_RUNNING=false
+D_VLLM_URL=""
+D_COMFYUI_RUNNING=false
+D_COMFYUI_URL=""
+D_TRITON_RUNNING=false
+D_TRITON_URL=""
+D_NGINX_RUNNING=false
+D_CTOP_RUNNING=false
+D_SGLANG_RUNNING=false
+D_SGLANG_URL=""
+D_TABBYAPI_RUNNING=false
+D_TABBYAPI_URL=""
+D_LOCALAI_RUNNING=false
+D_LOCALAI_URL=""
+
 # ── Systemd user services ────────────────────────────────
 D_USER_SERVICES=()
 
@@ -266,8 +289,102 @@ D_RADEONTOP_BIN=""
 D_SENSORS_AVAILABLE=false
 D_SENSORS_FULL=()
 
+# ── Build port→process collision registry ─────────────────
+# Call once before ANY port-based discovery. Prevents false positives
+# when multiple services share the same port (e.g. Lemonade + LLM-Gateway on 8090).
+_disc_build_port_map() {
+    D_PORT_OWNER_MAP=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && D_PORT_OWNER_MAP+=("$line")
+    done < <(ss -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {
+        n=split($4,a,":"); port=a[n]
+        if (match($0, /users:\(\("([^"]+)",pid=([0-9]+)/, m)) {
+            cmd=m[1]; gsub(/.*\//, "", cmd); gsub(/:.*/, "", cmd)
+            print port "|" cmd
+        }
+    }' | sort -t'|' -k1 -n -u || true)
+}
+
+# Look up process name for a given port from the collision registry.
+# Returns empty string if port not found or map not built.
+_disc_port_owner() {
+    local port="$1"
+    local rec
+    for rec in "${D_PORT_OWNER_MAP[@]}"; do
+        [[ "${rec%%|*}" == "$port" ]] && { echo "${rec#*|}"; return; }
+    done
+}
+
+# Generic process-first service discovery helper.
+# Args: process_pattern port_default health_path [json_field_to_validate]
+# Sets D_*_RUNNING and D_*_URL if successful.
+_disc_probe_service() {
+    local _proc_pat="$1" _port_default="$2" _health_path="$3" _validate_field="${4:-}"
+    local _running_var="$5" _url_var="$6"
+
+    # 1. Try process-first discovery
+    local _pid
+    _pid=$(pgrep -x "$_proc_pat" 2>/dev/null | head -1 || true)
+    [[ -z "$_pid" ]] && _pid=$(pgrep -f "$_proc_pat" 2>/dev/null | head -1 || true)
+
+    local _port="$_port_default" _url
+    if [[ -n "$_pid" ]]; then
+        # Process found — look up its actual port
+        local _found_port
+        _found_port=$(ss -tlnp 2>/dev/null | awk -v p="$_pid" '$0 ~ "pid="p"," {n=split($4,a,":"); print a[n]}' | head -1 || true)
+        [[ -n "$_found_port" ]] && _port="$_found_port"
+    fi
+
+    _url="http://localhost:${_port}"
+
+    # 2. Cross-check port ownership (collision registry)
+    local _owner
+    _owner=$(_disc_port_owner "$_port" 2>/dev/null || true)
+    if [[ -n "$_owner" && -n "$_pid" ]]; then
+        # If we have both process and port owner, they should roughly match
+        # Allow some flexibility (e.g. python → uvicorn for FastAPI apps)
+        case "$_proc_pat" in
+            litellm) [[ "$_owner" != *"litellm"* && "$_owner" != *"python"* && "$_owner" != *"uvicorn"* ]] && return ;;
+            vllm)    [[ "$_owner" != *"vllm"* && "$_owner" != *"python"* ]] && return ;;
+            comfyui) [[ "$_owner" != *"comfy"* && "$_owner" != *"python"* ]] && return ;;
+            tritonserver) [[ "$_owner" != *"triton"* ]] && return ;;
+            sglang)  [[ "$_owner" != *"sglang"* && "$_owner" != *"python"* ]] && return ;;
+            tabbyapi) [[ "$_owner" != *"tabby"* && "$_owner" != *"python"* && "$_owner" != *"uvicorn"* ]] && return ;;
+            local-ai) [[ "$_owner" != *"local"* && "$_owner" != *"python"* ]] && return ;;
+            llm-gateway) [[ "$_owner" == *"lemond"* || "$_owner" == *"lemonade"* ]] && return ;;
+        esac
+    fi
+
+    # 3. Query health endpoint
+    local _resp
+    _resp=$(curl -sf --max-time 0.5 "${_url}${_health_path}" 2>/dev/null || echo "")
+    [[ -z "$_resp" ]] && return
+
+    # 4. Validate response structure if requested
+    if [[ -n "$_validate_field" ]]; then
+        local _has_field
+        _has_field=$(echo "$_resp" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    print('ok' if '${_validate_field}' in d else '')
+except: print('')
+" 2>/dev/null || echo "")
+        [[ -z "$_has_field" ]] && return
+    fi
+
+    # 5. Success — set variables via eval
+    eval "$_running_var=true"
+    eval "$_url_var=\"$_url\""
+}
+
 discover() {
     # Discovery must never abort startup; keep failures isolated per probe.
+
+    # Phase 1: Build port→process collision registry FIRST
+    _disc_build_port_map || true
+
+    # Phase 2: Process-first discovery for all services
     _disc_cpu || true
     _disc_memory || true
     _disc_ollama || true
@@ -281,6 +398,15 @@ discover() {
     _disc_services || true
     _disc_lemonade || true
     _disc_hermes || true
+    _disc_litellm || true
+    _disc_vllm || true
+    _disc_comfyui || true
+    _disc_triton || true
+    _disc_nginx || true
+    _disc_ctop || true
+    _disc_sglang || true
+    _disc_tabbyapi || true
+    _disc_localai || true
     _disc_systemd_user || true
     _disc_process_groups || true
     _disc_kworkers || true
@@ -499,22 +625,24 @@ _disc_llm_gateway() {
     D_GATEWAY_SLOTS_KV=()
     D_GATEWAY_SLOTS_INFLIGHT=()
 
-    local port="${GATEWAY_PORT:-8090}"
-    local url="http://localhost:${port}"
-    local health_resp
-    health_resp=$(curl -sf --max-time 0.3 "${url}/health" 2>/dev/null || echo "")
-    [[ -z "$health_resp" ]] && return
+    # Use the generic process-first probe helper
+    _disc_probe_service "llm-gateway" "${GATEWAY_PORT:-8090}" "/health" "version" \
+        "D_GATEWAY_RUNNING" "D_GATEWAY_URL" || true
 
-    D_GATEWAY_RUNNING=true
-    D_GATEWAY_URL="$url"
+    [[ "$D_GATEWAY_RUNNING" != true ]] && return
+
+    # Extract version from validated health response
+    local health_resp
+    health_resp=$(curl -sf --max-time 0.3 "${D_GATEWAY_URL}/health" 2>/dev/null || echo "")
     D_GATEWAY_VER=$(echo "$health_resp" | python3 -c "
 import json,sys
 try: print(json.load(sys.stdin).get('version','?'))
 except: print('?')
 " 2>/dev/null || echo "?")
 
+    # Fetch slot status
     local status_resp
-    status_resp=$(curl -sf --max-time 0.5 "${url}/status" 2>/dev/null || echo "")
+    status_resp=$(curl -sf --max-time 0.5 "${D_GATEWAY_URL}/status" 2>/dev/null || echo "")
     [[ -z "$status_resp" ]] && return
 
     # Parse slots into parallel arrays
@@ -634,7 +762,7 @@ _disc_services() {
     units=$(systemctl list-units --type=service --state=active \
         --no-legend --no-pager 2>/dev/null \
         | awk '{print $1}' || true)
-    local keywords=("ollama" "docker" "n8n" "lmstudio" "rocm" "amd" "containerd" "open-webui" "lemonade" "hermes" "zed" "supavisor" "realtime" "postgrest" "nginx" "uvicorn" "redis" "bitwarden" "tailscale" "lemond")
+    local keywords=("ollama" "docker" "n8n" "lmstudio" "rocm" "amd" "containerd" "open-webui" "lemonade" "hermes" "zed" "supavisor" "realtime" "postgrest" "nginx" "uvicorn" "redis" "bitwarden" "tailscale" "lemond" "litellm" "vllm" "comfyui" "triton" "sglang" "tabbyapi" "local-ai")
     for svc in $units; do
         for kw in "${keywords[@]}"; do
             if [[ "$svc" == *"$kw"* ]]; then
@@ -715,6 +843,78 @@ _disc_hermes() {
     [[ -n "$D_HERMES_DESKTOP_PID" || -n "$D_HERMES_CLI_PID" || -n "$D_HERMES_GATEWAY_PID" ]] && D_HERMES_RUNNING=true
 }
 
+# ── LiteLLM (AI gateway / proxy) ─────────────────────────
+_disc_litellm() {
+    D_LITELLM_RUNNING=false
+    D_LITELLM_URL=""
+    _disc_probe_service "litellm" "4000" "/health" "status" \
+        "D_LITELLM_RUNNING" "D_LITELLM_URL" || true
+}
+
+# ── vLLM (high-throughput inference) ─────────────────────
+_disc_vllm() {
+    D_VLLM_RUNNING=false
+    D_VLLM_URL=""
+    _disc_probe_service "vllm" "8000" "/health" "" \
+        "D_VLLM_RUNNING" "D_VLLM_URL" || true
+}
+
+# ── ComfyUI (Stable Diffusion UI) ────────────────────────
+_disc_comfyui() {
+    D_COMFYUI_RUNNING=false
+    D_COMFYUI_URL=""
+    _disc_probe_service "comfyui" "8188" "/" "" \
+        "D_COMFYUI_RUNNING" "D_COMFYUI_URL" || true
+}
+
+# ── NVIDIA Triton Inference Server ───────────────────────
+_disc_triton() {
+    D_TRITON_RUNNING=false
+    D_TRITON_URL=""
+    _disc_probe_service "tritonserver" "8000" "/v2/health/ready" "" \
+        "D_TRITON_RUNNING" "D_TRITON_URL" || true
+}
+
+# ── nginx (reverse proxy, often fronts AI services) ──────
+_disc_nginx() {
+    D_NGINX_RUNNING=false
+    if pgrep -x "nginx" >/dev/null 2>&1; then
+        D_NGINX_RUNNING=true
+    fi
+}
+
+# ── ctop (container top monitor) ─────────────────────────
+_disc_ctop() {
+    D_CTOP_RUNNING=false
+    if pgrep -x "ctop" >/dev/null 2>&1; then
+        D_CTOP_RUNNING=true
+    fi
+}
+
+# ── SGLang (high-performance inference) ──────────────────
+_disc_sglang() {
+    D_SGLANG_RUNNING=false
+    D_SGLANG_URL=""
+    _disc_probe_service "sglang" "30000" "/health" "" \
+        "D_SGLANG_RUNNING" "D_SGLANG_URL" || true
+}
+
+# ── TabbyAPI (ExLlamaV2/V3 server) ───────────────────────
+_disc_tabbyapi() {
+    D_TABBYAPI_RUNNING=false
+    D_TABBYAPI_URL=""
+    _disc_probe_service "tabbyapi" "5000" "/v1/models" "" \
+        "D_TABBYAPI_RUNNING" "D_TABBYAPI_URL" || true
+}
+
+# ── LocalAI (OpenAI-compatible local server) ─────────────
+_disc_localai() {
+    D_LOCALAI_RUNNING=false
+    D_LOCALAI_URL=""
+    _disc_probe_service "local-ai" "8080" "/v1/models" "" \
+        "D_LOCALAI_RUNNING" "D_LOCALAI_URL" || true
+}
+
 # ── Systemd user services ──────────────────────────────────
 _disc_systemd_user() {
     D_USER_SERVICES=()
@@ -783,6 +983,54 @@ _disc_process_groups() {
         count=$(echo "$zed_pids" | wc -w)
         ram=$(_sum_rss "$zed_pids")
         D_PROCESS_GROUPS+=("Zed|${count}|${ram}|running")
+    fi
+
+    # vLLM group
+    if [[ "$D_VLLM_RUNNING" == true ]]; then
+        local vllm_pids
+        vllm_pids=$(pgrep -d' ' -f "vllm" 2>/dev/null || true)
+        if [[ -n "$vllm_pids" ]]; then
+            local count ram
+            count=$(echo "$vllm_pids" | wc -w)
+            ram=$(_sum_rss "$vllm_pids")
+            D_PROCESS_GROUPS+=("vLLM|${count}|${ram}|running")
+        fi
+    fi
+
+    # ComfyUI group
+    if [[ "$D_COMFYUI_RUNNING" == true ]]; then
+        local comfy_pids
+        comfy_pids=$(pgrep -d' ' -f "comfy" 2>/dev/null || true)
+        if [[ -n "$comfy_pids" ]]; then
+            local count ram
+            count=$(echo "$comfy_pids" | wc -w)
+            ram=$(_sum_rss "$comfy_pids")
+            D_PROCESS_GROUPS+=("ComfyUI|${count}|${ram}|running")
+        fi
+    fi
+
+    # Triton group
+    if [[ "$D_TRITON_RUNNING" == true ]]; then
+        local triton_pids
+        triton_pids=$(pgrep -d' ' -x "tritonserver" 2>/dev/null || true)
+        if [[ -n "$triton_pids" ]]; then
+            local count ram
+            count=$(echo "$triton_pids" | wc -w)
+            ram=$(_sum_rss "$triton_pids")
+            D_PROCESS_GROUPS+=("Triton|${count}|${ram}|running")
+        fi
+    fi
+
+    # SGLang group
+    if [[ "$D_SGLANG_RUNNING" == true ]]; then
+        local sglang_pids
+        sglang_pids=$(pgrep -d' ' -f "sglang" 2>/dev/null || true)
+        if [[ -n "$sglang_pids" ]]; then
+            local count ram
+            count=$(echo "$sglang_pids" | wc -w)
+            ram=$(_sum_rss "$sglang_pids")
+            D_PROCESS_GROUPS+=("SGLang|${count}|${ram}|running")
+        fi
     fi
 
     # System services group (just count, no RAM aggregation)
@@ -3120,6 +3368,12 @@ dashboard() {
     # Services
     echo -e "  ${BOLD}Services${NC}"
     echo -e "    Docker    ${_dock}  ${_dock_info}"
+    if [[ "$D_NGINX_RUNNING" == true ]]; then
+        echo -e "    Nginx     ${OK}  running"
+    fi
+    if [[ "$D_CTOP_RUNNING" == true ]]; then
+        echo -e "    ctop      ${OK}  running"
+    fi
     echo -e "    Disk      ${_disk}  ${disk_pct}% used"
     echo ""
 
@@ -3127,7 +3381,14 @@ dashboard() {
     local _ai_any=false
     if [[ "$D_OLLAMA_RUNNING" == true || \
           "$D_LMS_RUNNING" == true || "$D_CLAUDE_SESSION" == true || \
-          "$D_GATEWAY_RUNNING" == true ]] || \
+          "$D_GATEWAY_RUNNING" == true || \
+          "$D_LITELLM_RUNNING" == true || \
+          "$D_VLLM_RUNNING" == true || \
+          "$D_COMFYUI_RUNNING" == true || \
+          "$D_TRITON_RUNNING" == true || \
+          "$D_SGLANG_RUNNING" == true || \
+          "$D_TABBYAPI_RUNNING" == true || \
+          "$D_LOCALAI_RUNNING" == true ]] || \
        pgrep -x "$OPENCODE_PROCESS" >/dev/null 2>&1; then
         echo -e "  ${BOLD}AI Engine${NC}"
         _ai_any=true
@@ -3154,6 +3415,27 @@ dashboard() {
             [[ "$_slot_state" == "Error" ]]  && _slot_color=$FAIL
             echo -e "      ${D_GATEWAY_SLOTS_VAR[$i]}  ${_slot_color}  ${D_GATEWAY_SLOTS_MODEL[$i]}  ${D_GATEWAY_SLOTS_RSS[$i]} MB  ${_slot_state}"
         done
+    fi
+    if [[ "$D_LITELLM_RUNNING" == true ]]; then
+        echo -e "    LiteLLM     ${OK}  ${D_LITELLM_URL}"
+    fi
+    if [[ "$D_VLLM_RUNNING" == true ]]; then
+        echo -e "    vLLM        ${OK}  ${D_VLLM_URL}"
+    fi
+    if [[ "$D_SGLANG_RUNNING" == true ]]; then
+        echo -e "    SGLang      ${OK}  ${D_SGLANG_URL}"
+    fi
+    if [[ "$D_TABBYAPI_RUNNING" == true ]]; then
+        echo -e "    TabbyAPI    ${OK}  ${D_TABBYAPI_URL}"
+    fi
+    if [[ "$D_LOCALAI_RUNNING" == true ]]; then
+        echo -e "    LocalAI     ${OK}  ${D_LOCALAI_URL}"
+    fi
+    if [[ "$D_COMFYUI_RUNNING" == true ]]; then
+        echo -e "    ComfyUI     ${OK}  ${D_COMFYUI_URL}"
+    fi
+    if [[ "$D_TRITON_RUNNING" == true ]]; then
+        echo -e "    Triton      ${OK}  ${D_TRITON_URL}"
     fi
     if $_ai_any; then
         echo ""
@@ -3976,6 +4258,79 @@ mod_ai_engine() {
             oc_label="${IDLE} not installed"
         fi
         echo -e "  OpenCode    ${oc_label}"
+
+        # ── AI Infrastructure ─────────────────────────────────
+        local litellm_label
+        if [[ "$D_LITELLM_RUNNING" == true ]]; then
+            litellm_label="${OK} ${D_LITELLM_URL}"
+        else
+            litellm_label="${IDLE} stopped"
+        fi
+        echo -e "  LiteLLM     ${litellm_label}"
+
+        local vllm_label
+        if [[ "$D_VLLM_RUNNING" == true ]]; then
+            vllm_label="${OK} ${D_VLLM_URL}"
+        else
+            vllm_label="${IDLE} stopped"
+        fi
+        echo -e "  vLLM        ${vllm_label}"
+
+        local comfy_label
+        if [[ "$D_COMFYUI_RUNNING" == true ]]; then
+            comfy_label="${OK} ${D_COMFYUI_URL}"
+        else
+            comfy_label="${IDLE} stopped"
+        fi
+        echo -e "  ComfyUI     ${comfy_label}"
+
+        local triton_label
+        if [[ "$D_TRITON_RUNNING" == true ]]; then
+            triton_label="${OK} ${D_TRITON_URL}"
+        else
+            triton_label="${IDLE} stopped"
+        fi
+        echo -e "  Triton      ${triton_label}"
+
+        local nginx_label
+        if [[ "$D_NGINX_RUNNING" == true ]]; then
+            nginx_label="${OK} running"
+        else
+            nginx_label="${IDLE} stopped"
+        fi
+        echo -e "  nginx       ${nginx_label}"
+
+        local ctop_label
+        if [[ "$D_CTOP_RUNNING" == true ]]; then
+            ctop_label="${OK} running"
+        else
+            ctop_label="${IDLE} stopped"
+        fi
+        echo -e "  ctop        ${ctop_label}"
+
+        local sglang_label
+        if [[ "$D_SGLANG_RUNNING" == true ]]; then
+            sglang_label="${OK} ${D_SGLANG_URL}"
+        else
+            sglang_label="${IDLE} stopped"
+        fi
+        echo -e "  SGLang      ${sglang_label}"
+
+        local tabby_label
+        if [[ "$D_TABBYAPI_RUNNING" == true ]]; then
+            tabby_label="${OK} ${D_TABBYAPI_URL}"
+        else
+            tabby_label="${IDLE} stopped"
+        fi
+        echo -e "  TabbyAPI    ${tabby_label}"
+
+        local localai_label
+        if [[ "$D_LOCALAI_RUNNING" == true ]]; then
+            localai_label="${OK} ${D_LOCALAI_URL}"
+        else
+            localai_label="${IDLE} stopped"
+        fi
+        echo -e "  LocalAI     ${localai_label}"
         echo ""
 
         echo "   1)  Lemonade               (start · stop · backend status)"
@@ -5358,6 +5713,13 @@ _SCAN_REGISTRY=(
     "Ollama|ollama|ollama|ollama.service|11434|~/.ollama|ai-inference|HTTP-based LLM server (primary backend)"
     "LM Studio||lmstudio||1234|~/.lmstudio|ai-inference|GUI model downloader and inference server"
     "LLM-Gateway|${LLM_GATEWAY_DIR:-/home/hox/projects/llm-gateway}/target/release/llm-gateway|llm-gateway||8090|${LLM_GATEWAY_DIR:-/home/hox/projects/llm-gateway}/config/slots.toml|ai-inference|Rust slot-based LLM gateway (Workhorse, Tiny, Vision, etc.)"
+    "LiteLLM||litellm||4000||ai-inference|AI gateway / proxy (OpenAI-compatible)"
+    "vLLM||vllm||8000||ai-inference|High-throughput LLM inference engine"
+    "ComfyUI||comfyui||8188||ai-inference|Stable Diffusion UI and inference server"
+    "Triton||tritonserver||8000||ai-inference|NVIDIA Triton Inference Server"
+    "SGLang||sglang||30000||ai-inference|High-performance LLM inference engine"
+    "TabbyAPI||tabbyapi||5000||ai-inference|ExLlamaV2/V3 API server"
+    "LocalAI||local-ai||8080||ai-inference|OpenAI-compatible local AI server"
     # ── AI Tools ────────────────────────────────────────────
     "Claude Code|claude|claude|||~/.claude|ai-tools|Anthropic Claude Code CLI agent"
     "OpenCode|${OPENCODE_BIN}|${OPENCODE_PROCESS}|||${OPENCODE_CFG}|ai-tools|Standalone coding agent CLI"
@@ -5371,7 +5733,9 @@ _SCAN_REGISTRY=(
     # ── Networking ──────────────────────────────────────────
     "Tailscale|tailscale|tailscaled|tailscaled.service||/etc/tailscale|networking|Zero-config VPN mesh network"
     "OpenVPN|openvpn|openvpn|openvpn.service|||networking|VPN client/server"
+    "nginx|nginx|nginx|nginx.service||/etc/nginx|networking|Reverse proxy (often fronts AI services)"
     "Docker|docker|dockerd|docker.service|||/etc/docker|containers|Container runtime engine"
+    "ctop|ctop|ctop|||~/.ctop|containers|Container top monitor (Docker process viewer)"
     # ── Dev Tools ───────────────────────────────────────────
     "Node.js|node||||~/.nvm|dev|JavaScript runtime (via nvm)"
     "Python3|python3||||/usr/lib/python3|dev|Python interpreter"
@@ -5436,6 +5800,40 @@ _scan_entry() {
             [[ -n "$D_HERMES_CLI_PID" ]] && parts+="cli "
             [[ -n "$D_HERMES_GATEWAY_PID" ]] && parts+="gateway"
             run_info="${parts}"
+        elif [[ "$name" == "LiteLLM" && "$D_LITELLM_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_LITELLM_URL}"
+        elif [[ "$name" == "vLLM" && "$D_VLLM_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_VLLM_URL}"
+        elif [[ "$name" == "ComfyUI" && "$D_COMFYUI_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_COMFYUI_URL}"
+        elif [[ "$name" == "Triton" && "$D_TRITON_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_TRITON_URL}"
+        elif [[ "$name" == "nginx" && "$D_NGINX_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+        elif [[ "$name" == "ctop" && "$D_CTOP_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+        elif [[ "$name" == "SGLang" && "$D_SGLANG_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_SGLANG_URL}"
+        elif [[ "$name" == "TabbyAPI" && "$D_TABBYAPI_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_TABBYAPI_URL}"
+        elif [[ "$name" == "LocalAI" && "$D_LOCALAI_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_LOCALAI_URL}"
         fi
 
         # ── Process check ─────────────────────────────────

@@ -562,6 +562,79 @@ mod_ai_engine() {
             oc_label="${IDLE} not installed"
         fi
         echo -e "  OpenCode    ${oc_label}"
+
+        # ── AI Infrastructure ─────────────────────────────────
+        local litellm_label
+        if [[ "$D_LITELLM_RUNNING" == true ]]; then
+            litellm_label="${OK} ${D_LITELLM_URL}"
+        else
+            litellm_label="${IDLE} stopped"
+        fi
+        echo -e "  LiteLLM     ${litellm_label}"
+
+        local vllm_label
+        if [[ "$D_VLLM_RUNNING" == true ]]; then
+            vllm_label="${OK} ${D_VLLM_URL}"
+        else
+            vllm_label="${IDLE} stopped"
+        fi
+        echo -e "  vLLM        ${vllm_label}"
+
+        local comfy_label
+        if [[ "$D_COMFYUI_RUNNING" == true ]]; then
+            comfy_label="${OK} ${D_COMFYUI_URL}"
+        else
+            comfy_label="${IDLE} stopped"
+        fi
+        echo -e "  ComfyUI     ${comfy_label}"
+
+        local triton_label
+        if [[ "$D_TRITON_RUNNING" == true ]]; then
+            triton_label="${OK} ${D_TRITON_URL}"
+        else
+            triton_label="${IDLE} stopped"
+        fi
+        echo -e "  Triton      ${triton_label}"
+
+        local nginx_label
+        if [[ "$D_NGINX_RUNNING" == true ]]; then
+            nginx_label="${OK} running"
+        else
+            nginx_label="${IDLE} stopped"
+        fi
+        echo -e "  nginx       ${nginx_label}"
+
+        local ctop_label
+        if [[ "$D_CTOP_RUNNING" == true ]]; then
+            ctop_label="${OK} running"
+        else
+            ctop_label="${IDLE} stopped"
+        fi
+        echo -e "  ctop        ${ctop_label}"
+
+        local sglang_label
+        if [[ "$D_SGLANG_RUNNING" == true ]]; then
+            sglang_label="${OK} ${D_SGLANG_URL}"
+        else
+            sglang_label="${IDLE} stopped"
+        fi
+        echo -e "  SGLang      ${sglang_label}"
+
+        local tabby_label
+        if [[ "$D_TABBYAPI_RUNNING" == true ]]; then
+            tabby_label="${OK} ${D_TABBYAPI_URL}"
+        else
+            tabby_label="${IDLE} stopped"
+        fi
+        echo -e "  TabbyAPI    ${tabby_label}"
+
+        local localai_label
+        if [[ "$D_LOCALAI_RUNNING" == true ]]; then
+            localai_label="${OK} ${D_LOCALAI_URL}"
+        else
+            localai_label="${IDLE} stopped"
+        fi
+        echo -e "  LocalAI     ${localai_label}"
         echo ""
 
         echo "   1)  Lemonade               (start · stop · backend status)"
@@ -1944,6 +2017,13 @@ _SCAN_REGISTRY=(
     "Ollama|ollama|ollama|ollama.service|11434|~/.ollama|ai-inference|HTTP-based LLM server (primary backend)"
     "LM Studio||lmstudio||1234|~/.lmstudio|ai-inference|GUI model downloader and inference server"
     "LLM-Gateway|${LLM_GATEWAY_DIR:-/home/hox/projects/llm-gateway}/target/release/llm-gateway|llm-gateway||8090|${LLM_GATEWAY_DIR:-/home/hox/projects/llm-gateway}/config/slots.toml|ai-inference|Rust slot-based LLM gateway (Workhorse, Tiny, Vision, etc.)"
+    "LiteLLM||litellm||4000||ai-inference|AI gateway / proxy (OpenAI-compatible)"
+    "vLLM||vllm||8000||ai-inference|High-throughput LLM inference engine"
+    "ComfyUI||comfyui||8188||ai-inference|Stable Diffusion UI and inference server"
+    "Triton||tritonserver||8000||ai-inference|NVIDIA Triton Inference Server"
+    "SGLang||sglang||30000||ai-inference|High-performance LLM inference engine"
+    "TabbyAPI||tabbyapi||5000||ai-inference|ExLlamaV2/V3 API server"
+    "LocalAI||local-ai||8080||ai-inference|OpenAI-compatible local AI server"
     # ── AI Tools ────────────────────────────────────────────
     "Claude Code|claude|claude|||~/.claude|ai-tools|Anthropic Claude Code CLI agent"
     "OpenCode|${OPENCODE_BIN}|${OPENCODE_PROCESS}|||${OPENCODE_CFG}|ai-tools|Standalone coding agent CLI"
@@ -1957,7 +2037,9 @@ _SCAN_REGISTRY=(
     # ── Networking ──────────────────────────────────────────
     "Tailscale|tailscale|tailscaled|tailscaled.service||/etc/tailscale|networking|Zero-config VPN mesh network"
     "OpenVPN|openvpn|openvpn|openvpn.service|||networking|VPN client/server"
+    "nginx|nginx|nginx|nginx.service||/etc/nginx|networking|Reverse proxy (often fronts AI services)"
     "Docker|docker|dockerd|docker.service|||/etc/docker|containers|Container runtime engine"
+    "ctop|ctop|ctop|||~/.ctop|containers|Container top monitor (Docker process viewer)"
     # ── Dev Tools ───────────────────────────────────────────
     "Node.js|node||||~/.nvm|dev|JavaScript runtime (via nvm)"
     "Python3|python3||||/usr/lib/python3|dev|Python interpreter"
@@ -2022,6 +2104,40 @@ _scan_entry() {
             [[ -n "$D_HERMES_CLI_PID" ]] && parts+="cli "
             [[ -n "$D_HERMES_GATEWAY_PID" ]] && parts+="gateway"
             run_info="${parts}"
+        elif [[ "$name" == "LiteLLM" && "$D_LITELLM_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_LITELLM_URL}"
+        elif [[ "$name" == "vLLM" && "$D_VLLM_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_VLLM_URL}"
+        elif [[ "$name" == "ComfyUI" && "$D_COMFYUI_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_COMFYUI_URL}"
+        elif [[ "$name" == "Triton" && "$D_TRITON_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_TRITON_URL}"
+        elif [[ "$name" == "nginx" && "$D_NGINX_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+        elif [[ "$name" == "ctop" && "$D_CTOP_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+        elif [[ "$name" == "SGLang" && "$D_SGLANG_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_SGLANG_URL}"
+        elif [[ "$name" == "TabbyAPI" && "$D_TABBYAPI_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_TABBYAPI_URL}"
+        elif [[ "$name" == "LocalAI" && "$D_LOCALAI_RUNNING" == true ]]; then
+            is_running=true
+            is_installed=true
+            run_info="${D_LOCALAI_URL}"
         fi
 
         # ── Process check ─────────────────────────────────

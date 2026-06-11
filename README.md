@@ -74,6 +74,10 @@ to `/usr/local/bin/zmenu`. Build includes automated navigation validation.
 **Key principle:** shell commands discover facts, history remembers trends, the wiki stores knowledge. No hardcoded package knowledge.
 If it's installed, discovery finds it.
 
+**Discovery engine:** uses process-first detection with a port→process collision registry. It finds the
+process first (`pgrep`), verifies its port (`ss -tlnp`), then queries the health endpoint. This prevents
+false positives when multiple services share the same port (e.g. Lemonade and LLM-Gateway both on 8090).
+
 ---
 
 ## AI Integration (Optional)
@@ -83,11 +87,20 @@ required** — all dashboard features work standalone.
 
 | Tool | Discovery | Notes |
 |------|-----------|-------|
-| **Ollama** | Port 11434 + process check | Primary inference backend |
+| **Ollama** | Process + port 11434 | Primary inference backend |
 | **OpenCode** | `~/.opencode/bin/opencode` | TUI coding agent |
 | **LM Studio** | Port 1234 | Monitored only (status, model dir size) |
 | **Claude Code** | `claude` on `$PATH` | Discovered as installed app only |
-| **LLM-Gateway** | Port 8090 | Local gateway for model routing |
+| **LLM-Gateway** | Process + port 8090 | Local gateway for model routing |
+| **LiteLLM** | Process + port 4000 | AI gateway / proxy |
+| **vLLM** | Process + port 8000 | High-throughput inference engine |
+| **SGLang** | Process + port 30000 | High-performance LLM serving |
+| **TabbyAPI** | Process + port 5000 | ExLlamaV2/V3 API server |
+| **LocalAI** | Process + port 8080 | OpenAI-compatible local server |
+| **ComfyUI** | Process + port 8188 | Stable Diffusion UI |
+| **Triton** | Process + port 8000 | NVIDIA inference server |
+| **nginx** | Process check | Reverse proxy (often fronts AI services) |
+| **ctop** | Process check | Container top monitor |
 
 ### Ollama on Strix Halo
 

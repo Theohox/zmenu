@@ -355,6 +355,12 @@ dashboard() {
     # Services
     echo -e "  ${BOLD}Services${NC}"
     echo -e "    Docker    ${_dock}  ${_dock_info}"
+    if [[ "$D_NGINX_RUNNING" == true ]]; then
+        echo -e "    Nginx     ${OK}  running"
+    fi
+    if [[ "$D_CTOP_RUNNING" == true ]]; then
+        echo -e "    ctop      ${OK}  running"
+    fi
     echo -e "    Disk      ${_disk}  ${disk_pct}% used"
     echo ""
 
@@ -362,7 +368,14 @@ dashboard() {
     local _ai_any=false
     if [[ "$D_OLLAMA_RUNNING" == true || \
           "$D_LMS_RUNNING" == true || "$D_CLAUDE_SESSION" == true || \
-          "$D_GATEWAY_RUNNING" == true ]] || \
+          "$D_GATEWAY_RUNNING" == true || \
+          "$D_LITELLM_RUNNING" == true || \
+          "$D_VLLM_RUNNING" == true || \
+          "$D_COMFYUI_RUNNING" == true || \
+          "$D_TRITON_RUNNING" == true || \
+          "$D_SGLANG_RUNNING" == true || \
+          "$D_TABBYAPI_RUNNING" == true || \
+          "$D_LOCALAI_RUNNING" == true ]] || \
        pgrep -x "$OPENCODE_PROCESS" >/dev/null 2>&1; then
         echo -e "  ${BOLD}AI Engine${NC}"
         _ai_any=true
@@ -389,6 +402,27 @@ dashboard() {
             [[ "$_slot_state" == "Error" ]]  && _slot_color=$FAIL
             echo -e "      ${D_GATEWAY_SLOTS_VAR[$i]}  ${_slot_color}  ${D_GATEWAY_SLOTS_MODEL[$i]}  ${D_GATEWAY_SLOTS_RSS[$i]} MB  ${_slot_state}"
         done
+    fi
+    if [[ "$D_LITELLM_RUNNING" == true ]]; then
+        echo -e "    LiteLLM     ${OK}  ${D_LITELLM_URL}"
+    fi
+    if [[ "$D_VLLM_RUNNING" == true ]]; then
+        echo -e "    vLLM        ${OK}  ${D_VLLM_URL}"
+    fi
+    if [[ "$D_SGLANG_RUNNING" == true ]]; then
+        echo -e "    SGLang      ${OK}  ${D_SGLANG_URL}"
+    fi
+    if [[ "$D_TABBYAPI_RUNNING" == true ]]; then
+        echo -e "    TabbyAPI    ${OK}  ${D_TABBYAPI_URL}"
+    fi
+    if [[ "$D_LOCALAI_RUNNING" == true ]]; then
+        echo -e "    LocalAI     ${OK}  ${D_LOCALAI_URL}"
+    fi
+    if [[ "$D_COMFYUI_RUNNING" == true ]]; then
+        echo -e "    ComfyUI     ${OK}  ${D_COMFYUI_URL}"
+    fi
+    if [[ "$D_TRITON_RUNNING" == true ]]; then
+        echo -e "    Triton      ${OK}  ${D_TRITON_URL}"
     fi
     if $_ai_any; then
         echo ""
