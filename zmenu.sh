@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  —  Built 2026-06-11 08:36:19
+#  Z-MENU  —  Built 2026-06-11 08:42:17
 #  Auto-generated from src/*.sh — edit sources, not this file
 #  Build: ./build.sh
 # ============================================================
@@ -43,7 +43,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.13.7"
+readonly ZMENU_VERSION="5.13.8"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
@@ -1037,6 +1037,34 @@ _disc_process_groups() {
             ram=$(_sum_rss "$sglang_pids")
             D_PROCESS_GROUPS+=("SGLang|${count}|${ram}|running")
         fi
+    fi
+
+    # Desktop/Shell group — aggregate DE processes that spike individually
+    local desktop_procs=(
+        Xorg Xwayland
+        gnome-shell gdm gdm3 gjs mutter gnome-session-binary gnome-session-ctl
+        gnome-terminal-server gnome-text-editor gnome-software gnome-control-center
+        gnome-calculator gnome-calendar gnome-system-monitor gnome-screensaver
+        nautilus nemo thunar dolphin
+        pulseaudio pipewire pipewire-pulse wireplumber
+        tracker-miner-fs tracker-extract tracker-store
+        xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-kde
+        xdg-document-portal polkitd polkit-agent
+        kwin kwin_x11 kwin_wayland plasmashell krunner ksmserver
+        dunst mako notify-osd
+    )
+    local desktop_pids=""
+    for proc in "${desktop_procs[@]}"; do
+        local dp
+        dp=$(pgrep -d' ' -x "$proc" 2>/dev/null || true)
+        [[ -n "$dp" ]] && desktop_pids="${desktop_pids:+$desktop_pids }$dp"
+    done
+    desktop_pids=$(echo "$desktop_pids" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')
+    if [[ -n "$desktop_pids" ]]; then
+        local count ram
+        count=$(echo "$desktop_pids" | wc -w)
+        ram=$(_sum_rss "$desktop_pids")
+        D_PROCESS_GROUPS+=("Desktop/Shell|${count}|${ram}|running")
     fi
 
     # System services group (just count, no RAM aggregation)
@@ -2992,7 +3020,7 @@ mod_kill_mode() {
         echo ""
         echo "   1)  Top CPU consumers        (find what's hammering your CPU)"
         echo "   2)  Top RAM consumers        (find what's eating your memory)"
-        echo "   3)  Process groups           (kill Lemonade · Hermes · Docker · etc)"
+        echo "   3)  Process groups           (kill Desktop/Shell · Lemonade · Hermes · Docker · etc)"
         echo "   4)  Unknown / suspicious     (processes not in registry)"
         echo "   5)  Kill by PID              (enter any process ID)"
         echo ""
@@ -6429,7 +6457,7 @@ mod_apps_services() {
         echo "   d)  Start a service        (n8n · SearXNG · Crawl4AI · Open WebUI)"
         echo "   e)  Stop a container"
         echo "   f)  Restart a container"
-        echo "   g)  Process groups         (Lemonade · Hermes · Docker · Zed · System)"
+        echo "   g)  Process groups         (Desktop/Shell · Lemonade · Hermes · Docker · Zed · System)"
         echo "   h)  Systemd user services  (active user services)"
         echo ""
         if [[ "${AI_BACKEND_ACTIVE:-none}" != "none" ]]; then

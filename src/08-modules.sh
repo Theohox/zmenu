@@ -2727,7 +2727,7 @@ mod_apps_services() {
         echo "   d)  Start a service        (n8n · SearXNG · Crawl4AI · Open WebUI)"
         echo "   e)  Stop a container"
         echo "   f)  Restart a container"
-        echo "   g)  Process groups         (Lemonade · Hermes · Docker · Zed · System)"
+        echo "   g)  Process groups         (Desktop/Shell · Lemonade · Hermes · Docker · Zed · System)"
         echo "   h)  Systemd user services  (active user services)"
         echo ""
         if [[ "${AI_BACKEND_ACTIVE:-none}" != "none" ]]; then

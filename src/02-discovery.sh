@@ -861,6 +861,34 @@ _disc_process_groups() {
         fi
     fi
 
+    # Desktop/Shell group — aggregate DE processes that spike individually
+    local desktop_procs=(
+        Xorg Xwayland
+        gnome-shell gdm gdm3 gjs mutter gnome-session-binary gnome-session-ctl
+        gnome-terminal-server gnome-text-editor gnome-software gnome-control-center
+        gnome-calculator gnome-calendar gnome-system-monitor gnome-screensaver
+        nautilus nemo thunar dolphin
+        pulseaudio pipewire pipewire-pulse wireplumber
+        tracker-miner-fs tracker-extract tracker-store
+        xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-kde
+        xdg-document-portal polkitd polkit-agent
+        kwin kwin_x11 kwin_wayland plasmashell krunner ksmserver
+        dunst mako notify-osd
+    )
+    local desktop_pids=""
+    for proc in "${desktop_procs[@]}"; do
+        local dp
+        dp=$(pgrep -d' ' -x "$proc" 2>/dev/null || true)
+        [[ -n "$dp" ]] && desktop_pids="${desktop_pids:+$desktop_pids }$dp"
+    done
+    desktop_pids=$(echo "$desktop_pids" | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')
+    if [[ -n "$desktop_pids" ]]; then
+        local count ram
+        count=$(echo "$desktop_pids" | wc -w)
+        ram=$(_sum_rss "$desktop_pids")
+        D_PROCESS_GROUPS+=("Desktop/Shell|${count}|${ram}|running")
+    fi
+
     # System services group (just count, no RAM aggregation)
     local svc_count
     svc_count=${#D_SERVICES[@]}

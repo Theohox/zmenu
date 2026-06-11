@@ -405,7 +405,7 @@ mod_kill_mode() {
         echo ""
         echo "   1)  Top CPU consumers        (find what's hammering your CPU)"
         echo "   2)  Top RAM consumers        (find what's eating your memory)"
-        echo "   3)  Process groups           (kill Lemonade · Hermes · Docker · etc)"
+        echo "   3)  Process groups           (kill Desktop/Shell · Lemonade · Hermes · Docker · etc)"
         echo "   4)  Unknown / suspicious     (processes not in registry)"
         echo "   5)  Kill by PID              (enter any process ID)"
         echo ""
