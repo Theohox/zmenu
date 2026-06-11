@@ -1,3 +1,32 @@
+# zmenu v5.14.1
+
+**Feedback-driven improvements: universal query, safer GPU detection, richer history, and CI hardening.**
+
+## Universal query
+
+- New `zmenu --query <term>` flag searches the wiki, command history, and recent metrics in one shot.
+- Prints a concise markdown summary for piping to an AI or a pager.
+
+## Time-series history & diagnostics
+
+- Metrics history now records GPU temperature, GPU utilization, and load average alongside RAM.
+- New `_history_zoom()` helper for retrieving recent metric windows.
+- Added `_disc_collect()` dispatcher so future metrics plugins can feed the history pipeline uniformly.
+
+## Safety / configuration
+
+- Added `ZMENU_GFX_AUTO_CORRECT` config (default `false`).
+  - `gfx1100` is no longer silently remapped to `gfx1151`.
+  - Users must opt in to auto-correction.
+
+## QA / hygiene
+
+- Fixed all `shellcheck -S warning` findings in the source tree.
+- Fixed `set -e` abort in `_query_universal()` when `grep -c` finds zero matches.
+- Fixed the bats `no runtime eval` test so source comments containing the word `eval` are not flagged.
+
+---
+
 # zmenu v5.14.0
 
 **Lemonade & Hermes become first-class AI Engine citizens.**

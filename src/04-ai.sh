@@ -1,3 +1,4 @@
+# shellcheck shell=bash disable=SC2034
 # ============================================================
 #  SECTION 4 — LOCAL AI LAUNCHER
 # ============================================================
@@ -189,7 +190,8 @@ cc_launch() {
     # Write context into opencode rules so it's injected automatically
     _cc_write_rules "$full_context"
 
-    local session_file="${ZMENU_TMP_DIR}/zmenu-session-$(date +%s).md"
+    local session_file
+    session_file="${ZMENU_TMP_DIR}/zmenu-session-$(date +%s).md"
     printf '%s' "$full_context" > "$session_file"
     echo -e "  ${OK}  Context injected → ${OPENCODE_CFG}/rules.md"
     echo ""

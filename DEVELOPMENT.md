@@ -1,7 +1,7 @@
 # zmenu Development SOP
 
 Standard operating procedure for modifying zmenu.  
-**Current version:** 5.14.0  
+**Current version:** 5.14.1  
 **Source files:** `src/*.sh`  
 **Build script:** `./build.sh`  
 **Live binary:** `/usr/local/bin/zmenu`
@@ -43,12 +43,12 @@ Discovery (live shell commands)  →  Wiki (persistent knowledge)  →  AI (inte
 | `03-context.sh` | `context_generate()`, `_ctx_*` functions |
 | `04-ai.sh` | `_cc_inline`, `cc_launch`, `_ai_call`, `_ai_call_zenny`, `_ai_call_ollama` |
 | `05-apply.sh` | `_apply_generic`, `_opencode_stop`, `_apply_*` |
-| `06-wiki.sh` | `_wiki_path`, `_wiki_fast_refresh`, `_wiki_full_refresh`, `_wiki_log_change`, `_wiki_show` |
+| `06-wiki.sh` | `_wiki_path`, `_wiki_fast_refresh`, `_wiki_full_refresh`, `_wiki_log_change`, `_wiki_show`, `_query_universal` |
 | `07-chrome.sh` | `header`, `dashboard`, `export_report`, `pause`, `confirm` |
 | `07b-killmode.sh` | KILL MODE module: `mod_kill_mode`, `_kill_process_menu`, `_kill_top_cpu`, `_kill_top_mem`, `_kill_groups`, `_kill_unknowns`, `_kill_by_pid` |
 | `08-modules.sh` | All `mod_*` and helper functions (AI Engine, System Scan, Hardware, Security, Maintenance, Projects, Settings) |
 | `08b-diagnostics.sh` | Kworker storm detection, external tool launchers, expanded hardware telemetry |
-| `09-main.sh` | `main_menu()`, `_bootstrap()`, CLI arg handler (`--run`, `--context`, `--help`) |
+| `09-main.sh` | `main_menu()`, `_bootstrap()`, CLI arg handler (`--run`, `--context`, `--query`, `--help`) |
 
 ### Finding a specific function
 
@@ -83,6 +83,7 @@ Defined at top of `00-header.sh`, user-overridable via `~/.zmenu/config`:
 | `ZMENU_AI_CONTEXT_LENGTH` | `8192` | tokens sent with each request |
 | `ZMENU_ZENNY_BINARY` | `~/.local/bin/zenny-core` | path to local inference binary |
 | `ZMENU_GPU_GFX_OVERRIDE` | `""` | force a specific gfx ID |
+| `ZMENU_GFX_AUTO_CORRECT` | `false` | auto-correct known misreported gfx IDs |
 | `ZMENU_MACHINE_LABEL` | `""` | shown in AI prompts (defaults to hostname) |
 | `ZMENU_PREFERRED_EDITOR` | `$VISUAL\|$EDITOR\|nano` | editor for in-menu editing |
 | `ZMENU_HEADLESS` | `0` | set to `1` to disable TTY `clear` (for cron/`--run`) |

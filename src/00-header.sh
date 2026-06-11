@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034
 # ============================================================
-#  Z-MENU  v5.13.8
+#  Z-MENU  v5.14.1
 #  Local Sovereign Dashboard
 #
 #  INSTALL:   ./build.sh && sudo cp zmenu.sh /usr/local/bin/zmenu
@@ -31,8 +32,9 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.14.0"
-readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
+readonly ZMENU_VERSION="5.14.1"
+ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
+readonly ZMENU_SELF
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
 # ── Config directory & defaults ────────────────────────────
@@ -47,7 +49,7 @@ ZMENU_ERROR_LOG="${ZMENU_TMP_DIR}/zmenu-errors.log"
 ZMENU_REPORT_FILE="${HOME}/zmenu-report.md"
 
 # Ensure private temp directory exists before any sensitive files are created
-mkdir -m 700 -p "$ZMENU_TMP_DIR" 2>/dev/null || true
+mkdir -p "$ZMENU_TMP_DIR" 2>/dev/null && chmod 700 "$ZMENU_TMP_DIR" 2>/dev/null || true
 
 # Default config values — overridden by config file
 ZMENU_PROJECTS_DIR="${HOME}/projects"
@@ -84,7 +86,7 @@ _zmenu_cleanup() {
 trap _zmenu_cleanup EXIT
 
 # Ensure error log has restrictive permissions
-mkdir -m 700 -p "$ZMENU_TMP_DIR" 2>/dev/null || true
+mkdir -p "$ZMENU_TMP_DIR" 2>/dev/null && chmod 700 "$ZMENU_TMP_DIR" 2>/dev/null || true
 touch "$ZMENU_ERROR_LOG" 2>/dev/null && chmod 600 "$ZMENU_ERROR_LOG" 2>/dev/null || true
 
 # ============================================================

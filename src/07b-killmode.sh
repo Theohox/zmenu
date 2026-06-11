@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ============================================================
 #  SECTION 11 — KILL MODE: STOP THE BULLSHIT
 #  Task manager for killing runaway processes fast.
@@ -176,8 +177,8 @@ _kill_groups() {
 
         local i=1
         for grp in "${D_PROCESS_GROUPS[@]}"; do
-            local gname gcount gram gstatus
-            IFS='|' read -r gname gcount gram gstatus <<< "$grp"
+            local gname gcount gram _gstatus
+            IFS='|' read -r gname gcount gram _gstatus <<< "$grp"
             if [[ "$gname" == "Docker" ]]; then
                 printf "   %2d)  %-18s %d containers\n" "$i" "$gname" "$gcount"
             elif [[ "$gram" -gt 0 ]]; then
@@ -199,8 +200,8 @@ _kill_groups() {
 
         if [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -ge 1 ]] && [[ "$n" -le ${#D_PROCESS_GROUPS[@]} ]]; then
             local grp="${D_PROCESS_GROUPS[$((n-1))]}"
-            local gname gcount gram gstatus
-            IFS='|' read -r gname gcount gram gstatus <<< "$grp"
+            local gname gcount gram _gstatus
+            IFS='|' read -r gname gcount gram _gstatus <<< "$grp"
 
             echo ""
             if confirm "Kill entire ${gname} group? (${gcount} procs, ${gram}MB)"; then

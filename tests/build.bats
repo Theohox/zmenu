@@ -29,6 +29,6 @@
 }
 
 @test "no runtime eval in discovery or apply engine" {
-    run bash -c 'grep -R "\beval\b" src/ | grep -v "\.sh:[0-9]*: *#" || true'
+    run bash -c 'grep -R "\beval\b" src/ | grep -Ev "\.sh:[[:space:]]*#" || true'
     [ -z "$output" ]
 }

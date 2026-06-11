@@ -4,7 +4,7 @@ A single-file bash CLI dashboard for AMD Strix Halo laptops running Ubuntu 24.04
 No cloud dependency, no telemetry, no install script — one file, dropped in `/usr/local/bin`.
 
 **Tested on:** HP ZBook Ultra 14 G1a · AMD Ryzen AI MAX+ PRO 395 · Radeon 8060S (gfx1151) · Ubuntu 24.04 LTS  
-**Version:** 5.14.0
+**Version:** 5.14.1
 
 ---
 
@@ -402,6 +402,10 @@ zmenu --run <function_name>
 # Dump the current system context to stdout (for debugging AI prompts)
 zmenu --context
 
+# Search the wiki, command history, and recent metrics for a term
+zmenu --query <term>
+# Example: zmenu --query ollama
+
 # Generate markdown report to ~/zmenu-report.md
 zmenu --export
 ```
@@ -433,6 +437,10 @@ ZMENU_AI_BACKEND="auto"
 # GPU gfx ID override — required if rocminfo reports wrong ID
 # Strix Halo: rocminfo reports gfx1100, real die is gfx1151
 ZMENU_GPU_GFX_OVERRIDE=gfx1151
+
+# Auto-correct known misreported gfx IDs (e.g. gfx1100 → gfx1151).
+# Disabled by default to avoid surprising overrides on new hardware.
+ZMENU_GFX_AUTO_CORRECT=false
 
 # Machine label shown in wiki (defaults to hostname)
 ZMENU_MACHINE_LABEL="My Strix Halo Box"

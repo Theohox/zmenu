@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ============================================================
 #  SECTION 4c — SOVEREIGN WIKI
 #  Pre-digested markdown knowledge base at ~/.zmenu/wiki/
@@ -165,8 +166,8 @@ _wiki_full_refresh() {
         done
         if dpkg -l openvpn 2>/dev/null | grep -q '^ii'; then
             printf "  OpenVPN config files:\n"
-            local _c; _c=$(ls /etc/openvpn/client/ 2>/dev/null | grep -c '\.conf\|\.ovpn' || echo 0)
-            local _s; _s=$(ls /etc/openvpn/server/ 2>/dev/null | grep -c '\.conf\|\.ovpn' || echo 0)
+            local _c; _c=$(find /etc/openvpn/client/ -maxdepth 1 -type f \( -name '*.conf' -o -name '*.ovpn' \) 2>/dev/null | wc -l | awk '{print $1}')
+            local _s; _s=$(find /etc/openvpn/server/ -maxdepth 1 -type f \( -name '*.conf' -o -name '*.ovpn' \) 2>/dev/null | wc -l | awk '{print $1}')
             printf "    client dir: %d .conf/.ovpn files\n" "$_c"
             printf "    server dir: %d .conf/.ovpn files\n" "$_s"
             local _t; _t=$(systemctl list-units 'openvpn@*.service' --no-legend 2>/dev/null | grep -c 'active running' || echo 0)
@@ -274,8 +275,8 @@ _wiki_full_refresh() {
         printf "# System Scan — %s\n\n" "$ts"
         printf "## App Registry Status\n"
         for rec in "${_SCAN_REGISTRY[@]}"; do
-            local sname sinst sproc ssvc sport sconfig scat sdesc
-            IFS='|' read -r sname sinst sproc ssvc sport sconfig scat sdesc <<< "$rec"
+            local sname sinst sproc scat
+            IFS='|' read -r sname sinst sproc _ _ _ scat _ <<< "$rec"
             local srunning="not installed"
             if [[ "$sinst" == docker:* ]]; then
                 local scn="${sinst#docker:}"
@@ -305,7 +306,7 @@ _wiki_full_refresh() {
         printf "\n## User binaries (~/.local/bin)\n"
         ls -1 "${HOME}/.local/bin/" 2>/dev/null | sed 's/^/  /' || printf "  (none)\n"
         printf "\n## Cargo tools (~/.cargo/bin)\n"
-        ls -1 "${HOME}/.cargo/bin/" 2>/dev/null | grep -v '\.d$' | sed 's/^/  /' || printf "  (none)\n"
+        find "${HOME}/.cargo/bin" -maxdepth 1 -type f ! -name '*.d' -printf '  %f\n' 2>/dev/null || printf "  (none)\n"
         printf "\n## npm global\n"
         npm list -g --depth=0 2>/dev/null | tail -n +2 | sed 's/[├└─ ]*/  /' | head -15 || printf "  (none)\n"
         printf "\n## pip (user)\n"
@@ -361,4 +362,81 @@ _wiki_show() {
     else
         echo "  (none yet — use 'apply' after AI suggestions)"
     fi
+}
+
+# ── Query the machine's second brain ──────────────────────
+# Searches wiki markdown, command history JSONL, and metrics JSONL for a
+# literal, case-insensitive term and prints a concise markdown summary.
+# Usage: _query_universal <term>
+_query_universal() {
+    local term="$1"
+    if [[ -z "$term" ]]; then
+        echo "Usage: zmenu --query <term>" >&2
+        return 1
+    fi
+
+    echo "# zmenu query: ${term}"
+    echo ""
+    echo "> Searched: wiki, command history, recent metrics"
+    echo ""
+
+    # 1. Wiki hits
+    local wiki_hits=0
+    if [[ -d "$ZMENU_WIKI_DIR" ]]; then
+        echo "## Wiki"
+        echo ""
+        local f
+        for f in "$ZMENU_WIKI_DIR"/*.md; do
+            [[ -f "$f" ]] || continue
+            local hits
+            hits=$(grep -Fic -- "$term" "$f" 2>/dev/null) || true
+            hits="${hits:-0}"
+            [[ "$hits" -eq 0 ]] && continue
+            wiki_hits=$((wiki_hits + hits))
+            echo "### $(basename "$f") (${hits} hits)"
+            grep -Fi -- "$term" "$f" 2>/dev/null | head -8 | sed 's/^/    /'
+            echo ""
+        done
+        [[ "$wiki_hits" -eq 0 ]] && echo "    (no wiki matches)" && echo ""
+    fi
+
+    # 2. Command history hits
+    echo "## Command history"
+    echo ""
+    if [[ -f "$ZMENU_SESSION_LOG" ]]; then
+        local cmd_hits
+        cmd_hits=$(grep -Fic -- "$term" "$ZMENU_SESSION_LOG" 2>/dev/null) || true
+        cmd_hits="${cmd_hits:-0}"
+        if [[ "$cmd_hits" -gt 0 ]]; then
+            echo "    ${cmd_hits} matching entries (last 10 shown):"
+            grep -Fi -- "$term" "$ZMENU_SESSION_LOG" 2>/dev/null | tail -10 | \
+                python3 -c "import sys,json; [print('    -',json.loads(l).get('t',''),json.loads(l).get('action',''),json.loads(l).get('detail','')[:80]) for l in sys.stdin]" 2>/dev/null || true
+        else
+            echo "    (no command history matches)"
+        fi
+    else
+        echo "    (no command history yet)"
+    fi
+    echo ""
+
+    # 3. Recent metrics hits
+    echo "## Recent metrics"
+    echo ""
+    local latest_metric
+    latest_metric=$(ls -1 "$ZMENU_HISTORY_DIR"/metrics.*.jsonl 2>/dev/null | tail -1 || true)
+    if [[ -n "$latest_metric" ]]; then
+        local metric_hits
+        metric_hits=$(grep -Fic -- "$term" "$latest_metric" 2>/dev/null) || true
+        metric_hits="${metric_hits:-0}"
+        if [[ "$metric_hits" -gt 0 ]]; then
+            echo "    ${metric_hits} matching metric snapshots (last 5 shown):"
+            grep -Fi -- "$term" "$latest_metric" 2>/dev/null | tail -5 | \
+                python3 -c "import sys,json; [print('    -',json.loads(l).get('t',''),json.dumps({k:v for k,v in json.loads(l).items() if k!='t'})) for l in sys.stdin]" 2>/dev/null || true
+        else
+            echo "    (no recent metric matches)"
+        fi
+    else
+        echo "    (no metrics history yet)"
+    fi
+    echo ""
 }

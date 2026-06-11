@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ============================================================
 #  SECTION 5 — CHROME: header, pause, confirm, export, dashboard
 # ============================================================
@@ -150,8 +151,8 @@ dashboard() {
 
     # ── Memory Pool ───────────────────────────────────────
     # Real breakdown: used = apps+cache; available = what apps can actually use
-    local mem_pct=0 avail_pct=0
-    [[ "$D_MEM_TOTAL_MB" -gt 0 ]] && mem_pct=$((D_MEM_USED_MB * 100 / D_MEM_TOTAL_MB))
+    local _mem_pct=0 avail_pct=0
+    [[ "$D_MEM_TOTAL_MB" -gt 0 ]] && _mem_pct=$((D_MEM_USED_MB * 100 / D_MEM_TOTAL_MB))
     [[ "$D_MEM_TOTAL_MB" -gt 0 ]] && avail_pct=$((D_MEM_AVAIL_MB * 100 / D_MEM_TOTAL_MB))
     local _mem
     if [[ $avail_pct -gt 30 ]]; then _mem=$OK

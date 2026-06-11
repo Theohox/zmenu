@@ -1,8 +1,9 @@
+# shellcheck shell=bash
 #  SECTION 1 — CONFIG
 # ============================================================
 
 cfg_init() {
-    mkdir -m 700 -p "$ZMENU_CONFIG_DIR"
+    mkdir -p "$ZMENU_CONFIG_DIR" && chmod 700 "$ZMENU_CONFIG_DIR"
     [[ -f "$ZMENU_CONFIG_FILE" ]] && return
     cat > "$ZMENU_CONFIG_FILE" << 'EOF'
 # Z-Menu Configuration
@@ -37,7 +38,11 @@ ZMENU_PREFERRED_EDITOR="${VISUAL:-${EDITOR:-nano}}"
 # Set this to force the correct ID:  ZMENU_GPU_GFX_OVERRIDE=gfx1151
 ZMENU_GPU_GFX_OVERRIDE=""
 
-# Machine label shown in AI system prompts and wiki (defaults to hostname if empty)
+# Auto-correct rocminfo's gfx1100 → gfx1151 Strix Halo misreport.
+# Set to true only if you have a Strix Halo/Radeon 8060S chip. Default is false
+# so genuine gfx1100 cards are not silently mislabelled.
+ZMENU_GFX_AUTO_CORRECT=false
+
 ZMENU_MACHINE_LABEL=""
 
 # ── Background Watch Mode ──────────────────────────────────

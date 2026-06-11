@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ============================================================
 #  SECTION 6 — MODULES
 # ============================================================
@@ -1126,7 +1127,7 @@ _ai_sub_hermes() {
         else
             echo -e "   s)  ${BGRN}Start Hermes gateway${NC}   (hermes gateway run in background)"
         fi
-        echo "   c)  Start Hermes CLI/TUI  (hermes --tui in background)"
+        echo "   t)  Start Hermes CLI/TUI  (hermes --tui in background)"
         echo "   d)  Start Hermes Desktop  (Electron app via hermes-desktop)"
         echo "   r)  Refresh status"
         echo ""
@@ -1143,7 +1144,7 @@ _ai_sub_hermes() {
                 else
                     _ai_start_hermes_gateway
                 fi ;;
-            c|C) _ai_start_hermes_cli ;;
+            t|T) _ai_start_hermes_cli ;;
             d|D) _ai_start_hermes_desktop ;;
             r|R) _disc_hermes >/dev/null 2>&1 || true ;;
             E) export_report "Hermes"; pause ;;
@@ -2163,7 +2164,7 @@ _scan_entry() {
     local name installed_check process svc port config cat desc
     IFS='|' read -r name installed_check process svc port config cat desc <<< "$rec"
 
-    local is_installed=false is_running=false run_info="" ver_info="" res_info=""
+    local is_installed=false is_running=false run_info="" _ver_info="" res_info=""
 
     # ── Docker container check ─────────────────────────────
     if [[ "$installed_check" == docker:* ]]; then
@@ -2428,8 +2429,8 @@ _scan_unknowns() {
 
     local cnt_flag=0 cnt_warn=0 cnt_safe=0
     while IFS= read -r line; do
-        local proc_user pid pcpu pmem rss comm
-        read -r proc_user pid pcpu pmem rss comm _ <<< "$line"
+        local proc_user pid pcpu _pmem rss _comm
+        read -r proc_user pid pcpu _pmem rss _comm _ <<< "$line"
         [[ -z "$pid" ]] && continue
         local rss_mb=$(( rss / 1024 ))
         local exe_path
@@ -2529,8 +2530,8 @@ _scan_detail() {
 
         # Status
         local result; result=$(_scan_entry "$rec")
-        local indicator rlabel run_info res_info
-        IFS='|' read -r indicator rlabel _label run_info res_info _ _ _ <<< "$result"
+        local indicator _rlabel run_info res_info
+        IFS='|' read -r indicator _rlabel _label run_info res_info _ _ _ <<< "$result"
         echo -e "  Status:    ${indicator}  ${_label}  ${run_info}"
         [[ -n "$res_info" ]] && echo -e "  Resources: ${DIM}${res_info}${NC}"
         [[ -n "$port" && "$port" != unix:* ]] && echo -e "  Port:      :${port}"
@@ -2648,7 +2649,7 @@ _ctx_packages() {
     printf "\nUser binaries (~/.local/bin):\n"
     ls -1 "${HOME}/.local/bin/" 2>/dev/null | sed 's/^/  /' || printf "  (none)\n"
     printf "\nCargo tools (~/.cargo/bin):\n"
-    ls -1 "${HOME}/.cargo/bin/" 2>/dev/null | grep -v '\.d$' | sed 's/^/  /' || printf "  (none)\n"
+    find "${HOME}/.cargo/bin" -maxdepth 1 -type f ! -name '*.d' -printf '  %f\n' 2>/dev/null || printf "  (none)\n"
     printf "\nnpm global:\n"
     npm list -g --depth=0 2>/dev/null | tail -n +2 | sed 's/[├└─ ]*/  /' | head -15 || printf "  (none)\n"
     printf "\npip user:\n"
@@ -2708,7 +2709,7 @@ _scan_packages() {
 
         # ── Cargo binaries ────────────────────────────────────────
         if [[ -d "${HOME}/.cargo/bin" ]]; then
-            local _cargo_bins; _cargo_bins=$(ls -1 "${HOME}/.cargo/bin/" 2>/dev/null | grep -v '\.d$')
+            local _cargo_bins; _cargo_bins=$(find "${HOME}/.cargo/bin" -maxdepth 1 -type f ! -name '*.d' -printf '%f\n' 2>/dev/null)
             if [[ -n "$_cargo_bins" ]]; then
                 echo -e "  ${BOLD}~/.cargo/bin  ${DIM}(Rust tools)${NC}"
                 echo "$_cargo_bins" | awk '{printf "    %s\n", $0}'
@@ -2822,8 +2823,8 @@ mod_apps_services() {
         if [[ "$D_LEMONADE_RUNNING" == true ]]; then
             echo -e "  ${OK}  Lemonade  ${DIM}(pid:${D_LEMONADE_PID}  port:${D_LEMONADE_PORT})${NC}"
             for be in "${D_LEMONADE_BACKENDS[@]}"; do
-                local bname btype bport bpid bram
-                IFS='|' read -r bname btype bport bpid bram <<< "$be"
+                local bname _btype bport bpid bram
+                IFS='|' read -r bname _btype bport bpid bram <<< "$be"
                 printf "    ${OK}  %-16s pid:%-7s port:%-5s %s\n" "$bname" "$bpid" "${bport:-—}" "${DIM}${bram}MB${NC}"
             done
             echo ""
@@ -3039,7 +3040,7 @@ _docker_start() {
     echo "   r)  Back"
     echo ""
     read -rp "  Select: " n
-    local name url image vol port
+    local name _url image vol port
     case $n in
         1) name=n8n;      port=5678;  image=n8nio/n8n;                vol="-v n8n_data:/home/node/.n8n" ;;
         2) name=searxng;  port=8080;  image=searxng/searxng;          vol="" ;;
@@ -3802,7 +3803,7 @@ _priv_tailscale() {
             b) sudo systemctl disable tailscaled && echo -e "  ${OK}  Disabled" || echo -e "  ${FAIL}  Failed"; pause ;;
             c) sudo systemctl stop tailscaled && sudo systemctl disable tailscaled && echo -e "  ${OK}  Done" || echo -e "  ${FAIL}  Failed"; pause ;;
             d) sudo systemctl start tailscaled && echo -e "  ${OK}  Started" || echo -e "  ${FAIL}  Failed"; pause ;;
-            r|R|b|B) break ;;
+            r|R) break ;;
             q|Q) exit 0 ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 0.5 ;;
         esac
@@ -3846,7 +3847,7 @@ _priv_lockdown() {
         case $ch in
             a) _priv_lockdown_guided ;;
             b) _priv_lockdown_oneshot ;;
-            r|R|b|B) break ;;
+            r|R) break ;;
             q|Q) exit 0 ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 0.5 ;;
         esac
@@ -3906,6 +3907,7 @@ _priv_apply_env_vars() {
     printf 'export GATSBY_TELEMETRY_DISABLED=1\nexport NUXT_TELEMETRY_DISABLED=1\n' >> ~/.bashrc
     printf 'export ASTRO_TELEMETRY_DISABLED=1\nexport HOMEBREW_NO_ANALYTICS=1\n' >> ~/.bashrc
     printf 'export SAM_CLI_TELEMETRY=0\nexport SCARF_ANALYTICS=false\n' >> ~/.bashrc
+    # shellcheck source=/dev/null
     source ~/.bashrc 2>/dev/null || true
 }
 
@@ -4506,8 +4508,8 @@ _cc_mcps() {
         header
         echo -e "${BCYN}┄ MCP SERVERS${NC}"
         echo ""
-        local settings="${HOME}/.config/ai/settings.json"
-        if [[ ! -f "$settings" ]]; then
+        local settings_file="${HOME}/.config/ai/settings.json"
+        if [[ ! -f "$settings_file" ]]; then
             echo -e "  ${WARN}  No settings.json${NC}"
             echo ""
             echo "   a)  Add MCP server"
@@ -4521,7 +4523,7 @@ _cc_mcps() {
             esac
             continue
         fi
-        python3 - "$settings" << 'PYEOF'
+        python3 - "$settings_file" << 'PYEOF'
 import json, sys
 f = sys.argv[1]
 try:
@@ -4542,7 +4544,7 @@ PYEOF
         read -rp "  Selection: " ch
         case $ch in
             a|A) _cc_mcp_add ;;
-            e|E) _run_editor "$settings" ;;
+            e|E) _run_editor "$settings_file" ;;
             r|R) break ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 0.5 ;;
         esac
@@ -4557,8 +4559,8 @@ _cc_mcp_add() {
     read -rp "  URL: " mcp_url; [[ -z "$mcp_url" ]] && return
     read -rp "  Transport [sse/http/stdio] (default: sse): " mcp_transport
     mcp_transport="${mcp_transport:-sse}"
-    local settings="${HOME}/.config/ai/settings.json"
-    python3 - "$settings" "$mcp_name" "$mcp_transport" "$mcp_url" << 'PYEOF'
+    local settings_file="${HOME}/.config/ai/settings.json"
+    python3 - "$settings_file" "$mcp_name" "$mcp_transport" "$mcp_url" << 'PYEOF'
 import json, sys
 f, name, transport, url = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 try: d = json.load(open(f))

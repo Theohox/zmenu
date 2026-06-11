@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ============================================================
 #  SECTION 10 — DIAGNOSTICS & EXTERNAL TOOLS
 #  Kworker storm detection, external monitor launchers,

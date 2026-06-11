@@ -7,3 +7,4 @@ zmenu.sh
 
 # Internal planning file — keep out of release history.
 TODO.md
+shellcheck

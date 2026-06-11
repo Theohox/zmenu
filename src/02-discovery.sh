@@ -1,3 +1,4 @@
+# shellcheck shell=bash disable=SC2034
 # ============================================================
 #  SECTION 2 — DISCOVERY ENGINE
 #  Runs once at startup. Populates D_* variables.
@@ -215,39 +216,31 @@ except: print('')
     _url_ref="$_url"
 }
 
+# Plugin-style dispatcher for metric/service collectors.
+# Usage: _disc_collect <name>  (e.g. _disc_collect ollama)
+# Keeps discover() clean and makes adding a new probe = one function + one line.
+_disc_collect() {
+    local name="$1"
+    local fn="_disc_${name}"
+    if type "$fn" >/dev/null 2>&1; then
+        "$fn" || true
+    fi
+}
+
 discover() {
     # Discovery must never abort startup; keep failures isolated per probe.
 
     # Phase 1: Build port→process collision registry FIRST
     _disc_build_port_map || true
 
-    # Phase 2: Process-first discovery for all services
-    _disc_cpu || true
-    _disc_memory || true
-    _disc_ollama || true
-    _disc_lms || true
-    _disc_llm_gateway || true
-    _disc_ai_tool || true
-    _disc_docker || true
-    _disc_gpu || true
-    _disc_npu || true
-    _disc_services || true
-    _disc_lemonade || true
-    _disc_hermes || true
-    _disc_litellm || true
-    _disc_vllm || true
-    _disc_comfyui || true
-    _disc_triton || true
-    _disc_nginx || true
-    _disc_ctop || true
-    _disc_sglang || true
-    _disc_tabbyapi || true
-    _disc_localai || true
-    _disc_systemd_user || true
-    _disc_process_groups || true
-    _disc_kworkers || true
-    _disc_external_tools || true
-    _disc_ports || true
+    # Phase 2: Process-first discovery for all services (plugin style)
+    local _probe
+    for _probe in cpu memory ollama lms llm_gateway ai_tool docker gpu npu services \
+                  lemonade hermes litellm vllm comfyui triton nginx ctop sglang \
+                  tabbyapi localai systemd_user process_groups kworkers external_tools ports; do
+        _disc_collect "$_probe" || true
+    done
+
     _sel_ai_backend || true
     ( _wiki_full_refresh ) 2>/dev/null || true
     _history_append || true
@@ -256,7 +249,8 @@ discover() {
 # ── History & Persistence ──────────────────────────────────
 _history_append() {
     mkdir -p "$ZMENU_HISTORY_DIR"
-    local hf="$ZMENU_HISTORY_DIR/metrics.$(date +%Y%m%d).jsonl"
+    local hf
+    hf="$ZMENU_HISTORY_DIR/metrics.$(date +%Y%m%d).jsonl"
     local load1; load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo "0")
     printf '%s\n' \
         "{\"t\":\"$(date -Iseconds)\",\"gpu_temp\":${D_GPU_TEMP:-0},\"gpu_use\":${D_GPU_USE:-0},\"ram_used_mb\":${D_MEM_USED_MB:-0},\"ram_total_mb\":${D_MEM_TOTAL_MB:-0},\"swap_used_mb\":${D_SWAP_USED_MB:-0},\"load1\":${load1},\"docker_containers\":${#D_CONTAINERS[@]}}" \
@@ -303,6 +297,44 @@ except Exception:
     D_HIST_LOAD1=$(echo "$_json_out" | python3 -c "import sys,json; print(json.load(sys.stdin).get('load1',0))" 2>/dev/null || echo "0")
 }
 
+# Return averaged metric samples over a time window.
+# Usage: _history_zoom <metric> <hours>  (e.g. _history_zoom gpu_temp 24)
+# Prints one "timestamp avg_value" line per hourly bucket.
+_history_zoom() {
+    local metric="$1" hours="${2:-24}"
+    local cutoff; cutoff=$(date -d "-${hours} hours" +%s 2>/dev/null || echo "0")
+    [[ "$cutoff" == "0" ]] && return
+    local files
+    files=$(ls -1 "$ZMENU_HISTORY_DIR"/metrics.*.jsonl "$ZMENU_HISTORY_DIR"/metrics.*.jsonl.gz 2>/dev/null | sort || true)
+    [[ -z "$files" ]] && return
+    python3 -c '
+import json,sys,datetime,gzip
+cutoff=int(sys.argv[1]); metric=sys.argv[2]
+records=[]
+for f in sys.argv[3:]:
+    try:
+        op=gzip.open if f.endswith(".gz") else open
+        with op(f,"rt") as fh:
+            for line in fh:
+                d=json.loads(line)
+                ts=datetime.datetime.fromisoformat(d["t"].replace("Z","+00:00")).timestamp()
+                if ts>=cutoff and metric in d:
+                    records.append((ts,d[metric]))
+    except Exception:
+        pass
+if not records:
+    sys.exit(0)
+buckets={}
+for ts,v in records:
+    hr=int(ts)//3600
+    buckets.setdefault(hr,[]).append(float(v))
+for hr in sorted(buckets):
+    avg=sum(buckets[hr])/len(buckets[hr])
+    t=datetime.datetime.fromtimestamp(hr*3600).isoformat(timespec="minutes")
+    print(f"{t}  {avg:.1f}")
+' "$cutoff" "$metric" $files 2>/dev/null || true
+}
+
 _history_trend_str() {
     local current="$1" past="$2" label="${3:-}"
     local delta=0
@@ -329,7 +361,8 @@ _sparkline_read() {
     local count="${2:-30}"
     D_SPARKLINE_VALS=""
     D_SPARKLINE_MAX=1
-    local hf="$ZMENU_HISTORY_DIR/metrics.$(date +%Y%m%d).jsonl"
+    local hf
+    hf="$ZMENU_HISTORY_DIR/metrics.$(date +%Y%m%d).jsonl"
     [[ -f "$hf" ]] || return
     local _out
     _out=$(python3 -c '
@@ -541,12 +574,13 @@ _disc_gpu() {
         D_GPU_DRIVER="rocm"
         local _raw_gfx; _raw_gfx=$(rocminfo 2>/dev/null \
             | grep -i "gfx" | head -1 | grep -o 'gfx[0-9a-f]*' || echo "unknown")
-        # Config override takes priority; otherwise auto-fix Strix Halo: rocminfo reports
-        # gfx1100 for this die family but the real ID is gfx1151. Set ZMENU_GPU_GFX_OVERRIDE
-        # in ~/.zmenu/config if you need a different value.
+        # Config override takes priority; otherwise optionally auto-correct Strix Halo:
+        # rocminfo reports gfx1100 for this die family but the real ID is gfx1151.
+        # Auto-correction is now opt-in (ZMENU_GFX_AUTO_CORRECT) so genuine gfx1100 cards
+        # are not silently mislabelled.
         if [[ -n "${ZMENU_GPU_GFX_OVERRIDE:-}" ]]; then
             D_GPU_GFX="$ZMENU_GPU_GFX_OVERRIDE"
-        elif [[ "$_raw_gfx" == "gfx1100" ]]; then
+        elif [[ "$_raw_gfx" == "gfx1100" && "${ZMENU_GFX_AUTO_CORRECT:-false}" == "true" ]]; then
             D_GPU_GFX="gfx1151"  # Strix Halo: rocminfo bug — real die is gfx1151
         else
             D_GPU_GFX="$_raw_gfx"

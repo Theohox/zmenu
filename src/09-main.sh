@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 main_menu() {
     while true; do
         header
@@ -157,12 +158,24 @@ case "${1:-}" in
         cat "$ZMENU_REPORT_FILE"
         exit 0
         ;;
+    --query|-q)
+        if [[ -n "${2:-}" ]]; then
+            export ZMENU_HEADLESS=1
+            _bootstrap >/dev/null 2>&1 || true
+            _query_universal "$2"
+            exit $?
+        else
+            printf '%bError: --query requires a search term%b\n' "$BRED" "$NC" >&2
+            exit 1
+        fi
+        ;;
     --help|-h)
-        echo "Usage: zmenu [--run <function>] [--watch] [--context] [--export] [--help]"
-        echo "  --run <fn>    Execute a module function headlessly"
-        echo "  --watch       Background monitoring with threshold alerts"
-        echo "  --context     Dump live system context to stdout"
-        echo "  --export      Generate markdown report to ~/zmenu-report.md"
+        echo "Usage: zmenu [--run <function>] [--watch] [--context] [--export] [--query <term>] [--help]"
+        echo "  --run <fn>      Execute a module function headlessly"
+        echo "  --watch         Background monitoring with threshold alerts"
+        echo "  --context       Dump live system context to stdout"
+        echo "  --export        Generate markdown report to ~/zmenu-report.md"
+        echo "  --query <term>  Search wiki + history + metrics for a term"
         exit 0
         ;;
     "")

@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ============================================================
 #  SECTION 4b — INLINE AI CONTEXT FUNCTIONS
 #  Each _ctx_* function prints live section state to stdout.
@@ -339,8 +340,8 @@ _ctx_lemonade() {
         printf "\nBackends:\n"
         local be
         for be in "${D_LEMONADE_BACKENDS[@]}"; do
-            local bname btype bport bpid bram
-            IFS='|' read -r bname btype bport bpid bram <<< "$be"
+            local bname _btype bport bpid bram
+            IFS='|' read -r bname _btype bport bpid bram <<< "$be"
             printf "  %-14s pid:%-7s port:%-5s %s MB\n" "$bname" "$bpid" "${bport:-—}" "$bram"
         done
         printf "\nModels (downloaded):\n"
@@ -504,8 +505,8 @@ _ctx_security() {
     # OpenVPN config directory — show actual file counts, not raw ls output
     if dpkg -l openvpn 2>/dev/null | grep -q '^ii'; then
         printf "\n  OpenVPN config detail:\n"
-        local _oclient; _oclient=$(ls /etc/openvpn/client/ 2>/dev/null | grep -c '\.conf\|\.ovpn' || echo 0)
-        local _oserver; _oserver=$(ls /etc/openvpn/server/ 2>/dev/null | grep -c '\.conf\|\.ovpn' || echo 0)
+        local _oclient; _oclient=$(find /etc/openvpn/client/ -maxdepth 1 -type f \( -name '*.conf' -o -name '*.ovpn' \) 2>/dev/null | wc -l | awk '{print $1}')
+        local _oserver; _oserver=$(find /etc/openvpn/server/ -maxdepth 1 -type f \( -name '*.conf' -o -name '*.ovpn' \) 2>/dev/null | wc -l | awk '{print $1}')
         printf "    /etc/openvpn/client/: %d .conf/.ovpn files\n" "$_oclient"
         printf "    /etc/openvpn/server/: %d .conf/.ovpn files\n" "$_oserver"
         # Active tunnel instances (openvpn@<name>.service)
