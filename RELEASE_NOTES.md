@@ -1,3 +1,13 @@
+# zmenu v5.14.2
+
+**CI fix: correct test dependency package name for Ubuntu 24.04 runners.**
+
+## QA / hygiene
+
+- Changed `bats-core` to `bats` in `.github/workflows/ci.yml` so the CI install step succeeds on GitHub’s Ubuntu 24.04 runners.
+
+---
+
 # zmenu v5.14.1
 
 **Feedback-driven improvements: universal query, safer GPU detection, richer history, and CI hardening.**

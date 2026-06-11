@@ -16,7 +16,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck bats-core
+          sudo apt-get install -y shellcheck bats
 
       - name: Build
         run: ./build.sh

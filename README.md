@@ -4,7 +4,7 @@ A single-file bash CLI dashboard for AMD Strix Halo laptops running Ubuntu 24.04
 No cloud dependency, no telemetry, no install script — one file, dropped in `/usr/local/bin`.
 
 **Tested on:** HP ZBook Ultra 14 G1a · AMD Ryzen AI MAX+ PRO 395 · Radeon 8060S (gfx1151) · Ubuntu 24.04 LTS  
-**Version:** 5.14.1
+**Version:** 5.14.2
 
 ---
 

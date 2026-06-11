@@ -1,7 +1,7 @@
 # zmenu Development SOP
 
 Standard operating procedure for modifying zmenu.  
-**Current version:** 5.14.1  
+**Current version:** 5.14.2  
 **Source files:** `src/*.sh`  
 **Build script:** `./build.sh`  
 **Live binary:** `/usr/local/bin/zmenu`

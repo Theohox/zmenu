@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034
 # ============================================================
-#  Z-MENU  v5.14.1
+#  Z-MENU  v5.14.2
 #  Local Sovereign Dashboard
 #
 #  INSTALL:   ./build.sh && sudo cp zmenu.sh /usr/local/bin/zmenu
@@ -32,7 +32,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.14.1"
+readonly ZMENU_VERSION="5.14.2"
 ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_SELF
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
