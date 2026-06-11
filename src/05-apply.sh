@@ -175,10 +175,6 @@ _apply_generic() {
         if printf '%s' "$cmd" | grep -qE "(pkill|killall)[[:space:]].*bash"; then
             _blocked=true; _block_reason="would kill the shell"
         fi
-        # Directly launching Zenny-Core as a daemon (causes duplicate instances)
-        if printf '%s' "$cmd" | grep -qE "${ZENNY_PROCESS}[[:space:]]*&|${ZENNY_PROCESS}[[:space:]]*\$"; then
-            _blocked=true; _block_reason="would start a duplicate Zenny-Core — use AI Engine → Start"
-        fi
         # Re-launching zmenu inside apply (infinite nesting)
         if printf '%s' "$cmd" | grep -qE "^[[:space:]]*(zmenu|${ZMENU_INSTALL_PATH})[[:space:]]*\$"; then
             _blocked=true; _block_reason="cannot re-launch zmenu from inside zmenu"
@@ -277,29 +273,10 @@ _opencode_stop() {
         _wiki_log_change "OpenCode" "pkill $OPENCODE_PROCESS" "OK"
     fi
 }
-_apply_ai_engine()      { _apply_generic "$1" "AI Engine"; }
-
 # ── AI Engine context ─────────────────────────────────────
 _ctx_ai_engine() {
     printf "Section focus: AI stack health and configuration\n\n"
-    printf "Zenny-Core:      %s\n" "$(${D_ZENNY_RUNNING} && echo "running (PID ${D_ZENNY_PID:-?})  socket: ${D_ZENNY_SOCKET}" || echo 'stopped')"
-    printf "Zenny models:    %s\n" "${#D_ZENNY_MODELS[@]}"
-    for m in "${D_ZENNY_MODELS[@]}"; do printf "  - %s\n" "$m"; done
-    if [[ "$D_ZENNY_RUNNING" == true ]]; then
-        local stats_resp; stats_resp=$(_zenny_send '{"cmd":"stats"}' 2>/dev/null || echo "")
-        if [[ -n "$stats_resp" ]]; then
-            printf "Loaded models (tok/s):\n"
-            echo "$stats_resp" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    for m in d.get('models',[]):
-        print(f'  {m.get(\"name\",\"?\")}  {m.get(\"tok_s\",0):.0f} tok/s')
-except: pass
-" 2>/dev/null
-        fi
-    fi
-    printf "\nGPU driver:      %s  (Vulkan backend)\n" "$D_GPU_DRIVER"
+    printf "GPU driver:      %s  (Vulkan backend)\n" "$D_GPU_DRIVER"
     printf "GPU:             %s\n" "${D_GPU_GFX:-?}"
     printf "Memory pool:     %s MB total (unified — GPU shares with RAM)\n" "$D_MEM_TOTAL_MB"
     printf "\nOllama:          %s\n" "$(${D_OLLAMA_RUNNING} && echo 'RUNNING' || echo 'stopped')"
@@ -449,7 +426,7 @@ _ctx_security() {
                 "$_pkg" "$_enabled" "$_active"
         fi
     done
-    # OpenVPN config directory — tell Zenny the actual file counts, not raw ls output
+    # OpenVPN config directory — show actual file counts, not raw ls output
     if dpkg -l openvpn 2>/dev/null | grep -q '^ii'; then
         printf "\n  OpenVPN config detail:\n"
         local _oclient; _oclient=$(ls /etc/openvpn/client/ 2>/dev/null | grep -c '\.conf\|\.ovpn' || echo 0)
@@ -495,7 +472,6 @@ _ctx_settings() {
     cat "${ZMENU_CONFIG_FILE}" 2>/dev/null | sed 's/^/  /' || printf "  (no config file)\n"
     printf "\nEnvironment:\n"
     printf "  HSA_OVERRIDE_GFX_VERSION=%s\n" "${HSA_OVERRIDE_GFX_VERSION:-NOT SET}"
-    printf "  ZENNY_GPU_LAYERS=%s\n"          "${ZENNY_GPU_LAYERS:-not set}"
     printf "\nSovereign wiki: %s files in %s\n" \
         "$(ls "${ZMENU_WIKI_DIR}"/*.md 2>/dev/null | wc -l)" "${ZMENU_WIKI_DIR}"
 }

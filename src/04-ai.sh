@@ -9,10 +9,6 @@ OPENCODE_BIN="${HOME}/.opencode/bin/opencode"
 OPENCODE_PROCESS="opencode"
 OPENCODE_CFG="${HOME}/.config/opencode"
 
-ZENNY_BINARY="${HOME}/.local/bin/zenny-core"
-ZENNY_PROCESS="zenny-core"
-ZENNY_LOG="/tmp/zenny-core.log"
-
 owui_check() {
     if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qi "open-webui"; then
         echo -e "  ${WARN}  Open WebUI container not running"
@@ -80,8 +76,6 @@ print(json.dumps(arr))
     if [[ ${#D_SERVICES[@]} -gt 0 ]]; then
         _services=$(printf '%s\n' "${D_SERVICES[@]}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' 2>/dev/null || echo "[]")
     fi
-    local _zenny_models
-    _zenny_models=$(IFS=,; echo "${D_ZENNY_KEYS[*]}")
     local _load1; _load1=$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo "0")
     CTX_CPU_MODEL="${D_CPU_MODEL:-unknown}" \
     CTX_CPU_CORES="${D_CPU_CORES:-0}" \
@@ -98,8 +92,6 @@ print(json.dumps(arr))
     CTX_LOAD1="$_load1" \
     CTX_CONTAINERS="$_containers" \
     CTX_SERVICES="$_services" \
-    CTX_ZENNY_RUNNING="${D_ZENNY_RUNNING:-false}" \
-    CTX_ZENNY_MODELS="$_zenny_models" \
     CTX_OLLAMA_RUNNING="${D_OLLAMA_RUNNING:-false}" \
     CTX_BACKEND="${AI_BACKEND_LABEL:-none}" \
     CTX_AI_MODEL="${ZMENU_AI_MODEL:-auto}" \
@@ -113,7 +105,6 @@ d={
     "load":{"1min":float(os.environ.get("CTX_LOAD1","0") or 0)},
     "docker":{"containers":json.loads(os.environ.get("CTX_CONTAINERS","[]"))},
     "services":json.loads(os.environ.get("CTX_SERVICES","[]")),
-    "zenny":{"running":os.environ.get("CTX_ZENNY_RUNNING","")=="true","models":os.environ.get("CTX_ZENNY_MODELS","").split(",") if os.environ.get("CTX_ZENNY_MODELS","") else []},
     "ollama":{"running":os.environ.get("CTX_OLLAMA_RUNNING","")=="true"},
     "ai_backend":{"label":os.environ.get("CTX_BACKEND",""),"model":os.environ.get("CTX_AI_MODEL","")}
 }
@@ -137,89 +128,6 @@ _cc_write_rules() {
 #  Each adapter takes (sys_prompt, hist_file) and prints response.
 #  hist_file is a JSON array: [{"role":"user","content":"..."},...]
 # ============================================================
-
-_ai_call_zenny() {
-    local sys_prompt="$1"
-    local hist_file="$2"
-    # Use registry key for inference (not display name)
-    local model="${ZMENU_AI_MODEL:-}"
-    [[ -z "$model" && ${#D_ZENNY_KEYS[@]} -gt 0 ]] && model="${D_ZENNY_KEYS[0]}"
-    [[ -z "$model" ]] && { echo "[error: no Zenny model available — load one first]"; return 1; }
-    # Pass all dynamic data via env vars to avoid heredoc string interpolation (Python injection)
-    ZENNY_HIST_FILE="$hist_file" \
-    ZENNY_MODEL="$model" \
-    ZENNY_SYS_PROMPT="$sys_prompt" \
-    ZENNY_SOCKET="$D_ZENNY_SOCKET" \
-    timeout 180 python3 -c '
-import os, socket, json, sys, re
-
-hist_file = os.environ.get("ZENNY_HIST_FILE", "")
-model     = os.environ.get("ZENNY_MODEL", "")
-sys_prompt = os.environ.get("ZENNY_SYS_PROMPT", "")
-socket_path = os.environ.get("ZENNY_SOCKET", "")
-
-try:
-    hist = json.load(open(hist_file))
-except Exception:
-    hist = []
-
-# Zenny protocol: system + user only (no messages array)
-# Flatten history into user field as a conversation transcript
-current_msg = hist[-1]["content"] if hist and hist[-1]["role"] == "user" else ""
-prior = [m for m in hist[:-1]] if len(hist) > 1 else []
-
-if prior:
-    lines = []
-    for m in prior:
-        role = "User" if m["role"] == "user" else "Assistant"
-        lines.append(f"{role}: {m[\"content\"]}")
-    user_field = "Prior conversation:\n" + "\n".join(lines) + "\n\nCurrent message: " + current_msg
-else:
-    user_field = current_msg
-
-payload = json.dumps({
-    "model": model,
-    "system": sys_prompt,
-    "user": user_field,
-    "max_tokens": 2048,
-    "temperature": 0.3,
-    "stream": False
-}) + "\n"
-
-try:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(175)
-    s.connect(socket_path)
-    s.sendall(payload.encode())
-    buf = b""
-    while not buf.endswith(b"\n"):
-        chunk = s.recv(16384)
-        if not chunk:
-            break
-        buf += chunk
-    s.close()
-    d = json.loads(buf.decode().strip())
-    err = d.get("error")
-    if err:
-        if "space" in err.lower() or "context" in err.lower() or "kv" in err.lower():
-            print(f"[Model context window too small: {err}. Try Settings → AI Backend → select a smaller model for chat]", end="")
-        else:
-            print(f"[error: {err}]", end="")
-    else:
-        content = d.get("content", "[no content field in response]")
-        # Strip Qwen3 chain-of-thought — handle closed AND unclosed blocks
-        # (unclosed = model hit max_tokens before finishing the think phase)
-        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
-        content = re.sub(r"<think>.*$", "", content, flags=re.DOTALL)
-        content = content.strip()
-        if not content:
-            content = "[model hit token limit during thinking — try a shorter prompt or switch to a faster model in Settings → AI Backend]"
-        print(content, end="")
-except Exception as e:
-    print(f"[error: {e}]", end="")
-' 2>/dev/null
-}
-
 
 _ai_call_ollama() {
     local sys_prompt="$1"
@@ -250,7 +158,6 @@ _ai_call() {
     local sys_prompt="$1"
     local hist_file="$2"
     case "${AI_BACKEND_ACTIVE:-none}" in
-        zenny)    _ai_call_zenny  "$sys_prompt" "$hist_file" ;;
         ollama)   _ai_call_ollama "$sys_prompt" "$hist_file" ;;
         opencode)
             echo "[OpenCode is TUI-only — use AI Engine → AI Session for a full session]"
@@ -335,8 +242,8 @@ _cc_inline() {
         return 1
     fi
     if [[ "${AI_BACKEND_ACTIVE:-none}" == "opencode" ]]; then
-        echo -e "  ${WARN}  AI backend is set to OpenCode, but Ask AI requires Zenny-Core."
-        echo -e "  ${DIM}  Go to Settings → l) AI Backend and switch to 'zenny'.${NC}"
+        echo -e "  ${WARN}  AI backend is set to OpenCode, but Ask AI requires Ollama."
+        echo -e "  ${DIM}  Go to Settings → l) AI Backend and switch to 'ollama'.${NC}"
         sleep 2
         return 1
     fi

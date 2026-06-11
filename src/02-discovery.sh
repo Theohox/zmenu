@@ -15,13 +15,7 @@ D_LMS_URL=""
 D_LMS_RUNNING=false
 D_LMS_MODELS=()
 
-D_ZENNY_RUNNING=false
-D_ZENNY_SOCKET="/tmp/zenny-core.sock"
-D_ZENNY_MODELS=()           # display_name strings (for UI)
-D_ZENNY_KEYS=()             # registry keys (for inference requests)
-D_ZENNY_PID=""
-
-AI_BACKEND_ACTIVE=""        # resolved at runtime: zenny|opencode|ollama|none
+AI_BACKEND_ACTIVE=""        # resolved at runtime: opencode|ollama|none
 AI_BACKEND_LABEL=""         # human-readable label for display
 
 D_AI_BIN=""
@@ -99,7 +93,6 @@ discover() {
     _disc_cpu || true
     _disc_memory || true
     _disc_ollama || true
-    _disc_zenny || true
     _disc_lms || true
     _disc_llm_gateway || true
     _disc_ai_tool || true
@@ -297,62 +290,6 @@ _disc_ollama() {
     fi
 }
 
-# ── Zenny-Core socket helper ───────────────────────────────
-_zenny_send() {
-    local msg="$1"
-    # Guard against hangs: stale socket or unresponsive server
-    # Pass message via stdin to avoid heredoc string interpolation (Python injection)
-    printf '%s\n' "$msg" | timeout 5 python3 -c '
-import sys, socket
-req = sys.stdin.read()
-if not req.endswith("\n"):
-    req += "\n"
-try:
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(4)
-    s.connect(sys.argv[1])
-    s.sendall(req.encode())
-    buf = b""
-    while not buf.endswith(b"\n"):
-        chunk = s.recv(4096)
-        if not chunk:
-            break
-        buf += chunk
-    s.close()
-    print(buf.decode().strip())
-except Exception:
-    sys.exit(1)
-' "$D_ZENNY_SOCKET" 2>/dev/null
-}
-
-# ── Zenny-Core ─────────────────────────────────────────────
-_disc_zenny() {
-    D_ZENNY_RUNNING=false
-    D_ZENNY_MODELS=()
-    D_ZENNY_KEYS=()
-    D_ZENNY_PID=""
-    # Quick process check first — avoids blocking on a stale socket file
-    D_ZENNY_PID=$(pgrep -x "$ZENNY_PROCESS" 2>/dev/null | head -1 || true)
-    [[ -z "$D_ZENNY_PID" ]] && return
-    [[ ! -S "$D_ZENNY_SOCKET" ]] && return
-    local resp
-    resp=$(_zenny_send '{"cmd":"list_models"}' 2>/dev/null) || return
-    [[ -z "$resp" ]] && return
-    D_ZENNY_RUNNING=true
-    # Populate display names (UI) and registry keys (inference) in parallel
-    while IFS='|' read -r disp key; do
-        [[ -n "$disp" ]] && D_ZENNY_MODELS+=("$disp")
-        [[ -n "$key"  ]] && D_ZENNY_KEYS+=("$key")
-    done < <(echo "$resp" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    for m in d.get('models',[]):
-        print(m.get('display_name','?') + '|' + m.get('name','?'))
-except: pass
-" 2>/dev/null || true)
-}
-
 # ── LM Studio ──────────────────────────────────────────────
 _disc_lms() {
     local candidates=(1234 1235 8080)
@@ -519,7 +456,7 @@ _disc_services() {
     units=$(systemctl list-units --type=service --state=active \
         --no-legend --no-pager 2>/dev/null \
         | awk '{print $1}' || true)
-    local keywords=("ollama" "docker" "n8n" "lmstudio" "rocm" "amd" "containerd" "open-webui" "zenny" "lemonade" "hermes" "zed" "supavisor" "realtime" "postgrest" "nginx" "uvicorn" "redis" "bitwarden" "tailscale" "lemond")
+    local keywords=("ollama" "docker" "n8n" "lmstudio" "rocm" "amd" "containerd" "open-webui" "lemonade" "hermes" "zed" "supavisor" "realtime" "postgrest" "nginx" "uvicorn" "redis" "bitwarden" "tailscale" "lemond")
     for svc in $units; do
         for kw in "${keywords[@]}"; do
             if [[ "$svc" == *"$kw"* ]]; then
@@ -685,29 +622,6 @@ _disc_ports() {
         | sort -t: -k1 -n || true)
 }
 
-# ── Select backend and active model ───────────────────────
-# ── Pick best Zenny model for inline chat ─────────────────
-# Uses ZMENU_ZENNY_CHAT_MODEL if set and valid, otherwise prefers
-# the smallest model (9B > 7B > flash > anything) over large ones.
-_zenny_pick_chat_model() {
-    # 1. User-configured preference
-    if [[ -n "${ZMENU_ZENNY_CHAT_MODEL:-}" ]]; then
-        for k in "${D_ZENNY_KEYS[@]}"; do
-            [[ "$k" == "$ZMENU_ZENNY_CHAT_MODEL" ]] && { echo "$k"; return; }
-        done
-    fi
-    # 2. Auto-pick: prefer keys that look like small/fast models
-    local small_patterns=("9b" "7b" "8b" "flash" "mini" "tiny" "q4")
-    for pat in "${small_patterns[@]}"; do
-        for k in "${D_ZENNY_KEYS[@]}"; do
-            local kl="${k,,}"   # lowercase
-            [[ "$kl" == *"$pat"* ]] && { echo "$k"; return; }
-        done
-    done
-    # 3. Fall back to first available
-    echo "${D_ZENNY_KEYS[0]:-}"
-}
-
 # Sets AI_BACKEND_ACTIVE, AI_BACKEND_LABEL, ZMENU_AI_MODEL
 _sel_ai_backend() {
     local want="${ZMENU_AI_BACKEND:-auto}"
@@ -715,12 +629,6 @@ _sel_ai_backend() {
     AI_BACKEND_LABEL="none"
 
     case "$want" in
-        zenny)
-            if [[ "$D_ZENNY_RUNNING" == true && ${#D_ZENNY_KEYS[@]} -gt 0 ]]; then
-                AI_BACKEND_ACTIVE="zenny"
-                AI_BACKEND_LABEL="Zenny-Core"
-                ZMENU_AI_MODEL="$(_zenny_pick_chat_model)"
-            fi ;;
         opencode)
             if _opencode_available; then
                 AI_BACKEND_ACTIVE="opencode"
@@ -730,19 +638,19 @@ _sel_ai_backend() {
         ollama)
             if [[ "$D_OLLAMA_RUNNING" == true ]]; then
                 AI_BACKEND_ACTIVE="ollama"
-                AI_BACKEND_LABEL="Ollama (legacy)"
+                AI_BACKEND_LABEL="Ollama"
                 ZMENU_AI_MODEL="${D_OLLAMA_MODELS[0]:-none}"
             fi ;;
         auto|*)
             # Priority: auto-select best available
-            if [[ "$D_ZENNY_RUNNING" == true && ${#D_ZENNY_KEYS[@]} -gt 0 ]]; then
-                AI_BACKEND_ACTIVE="zenny"
-                AI_BACKEND_LABEL="Zenny-Core (auto)"
-                ZMENU_AI_MODEL="$(_zenny_pick_chat_model)"
-            elif [[ "$D_OLLAMA_RUNNING" == true && ${#D_OLLAMA_MODELS[@]} -gt 0 ]]; then
+            if [[ "$D_OLLAMA_RUNNING" == true && ${#D_OLLAMA_MODELS[@]} -gt 0 ]]; then
                 AI_BACKEND_ACTIVE="ollama"
                 AI_BACKEND_LABEL="Ollama (auto)"
                 ZMENU_AI_MODEL="${D_OLLAMA_MODELS[0]}"
+            elif _opencode_available; then
+                AI_BACKEND_ACTIVE="opencode"
+                AI_BACKEND_LABEL="OpenCode (auto)"
+                ZMENU_AI_MODEL="opencode"
             fi ;;
     esac
 }

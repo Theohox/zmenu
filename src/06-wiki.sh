@@ -33,7 +33,6 @@ _wiki_fast_refresh() {
     [[ ! -d "$ZMENU_WIKI_DIR" ]] && return
     _disc_memory 2>/dev/null
     _disc_gpu    2>/dev/null
-    _disc_zenny  2>/dev/null
     _disc_docker 2>/dev/null
     local ts; ts="$(date '+%H:%M')"
     local hw="${ZMENU_WIKI_DIR}/hardware.md"
@@ -79,25 +78,12 @@ _wiki_full_refresh() {
     # ── ai-stack.md ─────────────────────────────────────────
     {
         printf "# AI Stack — %s\n\n" "$ts"
-        printf "## Primary: Zenny-Core\n"
-        printf "Status:    %s\n" "$($D_ZENNY_RUNNING && echo "RUNNING  pid: ${D_ZENNY_PID:-?}  socket: ${D_ZENNY_SOCKET}" || echo 'stopped')"
-        printf "Binary:    %s\n" "${ZENNY_BINARY}"
-        printf "Models (%s available):\n" "${#D_ZENNY_MODELS[@]}"
-        for i in "${!D_ZENNY_MODELS[@]}"; do
-            printf "  [%s] display: %s\n" "$i" "${D_ZENNY_MODELS[$i]:-?}"
-            printf "       key:     %s\n" "${D_ZENNY_KEYS[$i]:-?}"
-        done
-        printf "\nActive backend:  %s\n" "${AI_BACKEND_LABEL:-none}"
-        printf "Active model:    %s\n\n" "${ZMENU_AI_MODEL:-auto}"
         printf "## GPU for Inference\n"
         printf "Device:  %s  driver: %s\n" "${D_GPU_GFX:-unknown}" "${D_GPU_DRIVER:-none}"
         printf "Backend: Vulkan  HSA_OVERRIDE_GFX_VERSION=%s\n" "${HSA_OVERRIDE_GFX_VERSION:-NOT SET — required!}"
         printf "\n## Other Tools\n"
         printf "OpenCode:    %s\n" "$(pgrep -x "$OPENCODE_PROCESS" >/dev/null 2>&1 && echo "RUNNING (pid: $(pgrep -x "$OPENCODE_PROCESS" | head -1))" || (_opencode_available 2>/dev/null && echo 'installed (not running)' || echo 'not installed'))"
-        printf "             OpenCode is a STANDALONE coding agent CLI — completely separate from Zenny-Core.\n"
-        printf "             It does NOT wrap or use Zenny-Core. It has its own model config.\n"
         printf "             Process name: opencode   Stop it with: pkill opencode\n"
-        printf "             zmenu's 'C) Ask AI' in the OpenCode section routes through Zenny-Core (NOT OpenCode).\n"
         printf "LM Studio:   %s\n" "$($D_LMS_RUNNING && echo 'running' || echo 'off')"
         printf "Ollama:      %s\n" "$($D_OLLAMA_RUNNING && echo 'RUNNING' || echo 'stopped')"
         printf "Open WebUI:  %s\n" "$(curl -sf "${OWUI_URL:-http://localhost:3000}" >/dev/null 2>&1 && echo "running at ${OWUI_URL:-http://localhost:3000}" || echo 'not running')"
@@ -108,8 +94,6 @@ _wiki_full_refresh() {
         printf "# OpenCode — %s\n\n" "$ts"
         printf "## What OpenCode Is\n"
         printf "OpenCode is a standalone coding agent CLI built on the OpenCode protocol.\n"
-        printf "It is a SEPARATE tool from Zenny-Core — they are INDEPENDENT processes.\n"
-        printf "OpenCode does NOT wrap Zenny-Core and does NOT call Zenny-Core for inference.\n"
         printf "OpenCode has its own model config at ~/.config/opencode/opencode.json.\n\n"
         printf "## Process Management\n"
         printf "Process name:  opencode\n"
@@ -132,8 +116,6 @@ _wiki_full_refresh() {
         printf "## zmenu Integration\n"
         printf "zmenu 'AI Engine → 3) OpenCode' manages OpenCode configuration.\n"
         printf "zmenu 'AI Engine → 6) AI session' launches the OpenCode TUI.\n"
-        printf "zmenu 'C) Ask AI' in OpenCode section routes through ZENNY-CORE (not OpenCode).\n"
-        printf "The AI answering your questions IS Zenny-Core — OpenCode is just the subject matter.\n\n"
         printf "## Config Contents\n"
         if [[ -f "${OPENCODE_CFG}/opencode.json" ]]; then
             cat "${OPENCODE_CFG}/opencode.json" 2>/dev/null | head -30 | sed 's/^/  /'
@@ -255,8 +237,6 @@ _wiki_full_refresh() {
         cat "${ZMENU_CONFIG_FILE}" 2>/dev/null | sed 's/^/  /' || printf "  (no config file)\n"
         printf "\nEnvironment:\n"
         printf "  HSA_OVERRIDE_GFX_VERSION=%s\n" "${HSA_OVERRIDE_GFX_VERSION:-NOT SET}"
-        printf "  ZENNY_GPU_LAYERS=%s\n"          "${ZENNY_GPU_LAYERS:-not set}"
-        printf "  ZENNY_VERBOSE=%s\n"             "${ZENNY_VERBOSE:-not set}"
     } > "${ZMENU_WIKI_DIR}/settings.md"
 
     # ── projects.md ─────────────────────────────────────────
@@ -286,7 +266,6 @@ _wiki_full_refresh() {
         printf "GPU:        %s  driver: %s\n" "${D_GPU_GFX:-unknown}" "${D_GPU_DRIVER:-none}"
         printf "RAM:        %s MB unified\n" "${D_MEM_TOTAL_MB:-?}"
         printf "Backend:    %s  model: %s\n" "${AI_BACKEND_LABEL:-none}" "${ZMENU_AI_MODEL:-auto}"
-        printf "\nZenny-Core: %s\n" "$($D_ZENNY_RUNNING && echo "RUNNING pid:${D_ZENNY_PID:-?}" || echo 'stopped')"
         printf "Wiki dir:   %s\n" "${ZMENU_WIKI_DIR}"
     } > "${ZMENU_WIKI_DIR}/general.md"
 
@@ -383,4 +362,3 @@ _wiki_show() {
         echo "  (none yet — use 'apply' after AI suggestions)"
     fi
 }
-

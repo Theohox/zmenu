@@ -18,21 +18,12 @@ ZMENU_AI_MODEL=""
 # Recommended: 8192 (fast) | 16384 (balanced) | 32768 (long docs)
 ZMENU_AI_CONTEXT_LENGTH=8192
 
-# AI backend: auto | zenny | opencode | ollama
-# auto = best available (Zenny-Core → Ollama)
+# AI backend: auto | opencode | ollama
+# auto = best available (Ollama → OpenCode)
 ZMENU_AI_BACKEND="auto"
-
-# Zenny-Core model to use for inline chat (registry key — use list from AI Backend picker)
-# Leave empty to auto-select smallest available model
-ZMENU_ZENNY_CHAT_MODEL=""
 
 # Editor for in-menu editing
 ZMENU_PREFERRED_EDITOR="${VISUAL:-${EDITOR:-nano}}"
-
-# Zenny-Core binary path — set to wherever you built/installed zenny-core
-# Default: ${HOME}/.local/bin/zenny-core
-# Build: cargo build --release --features vulkan  (in the zenny-core repo)
-ZMENU_ZENNY_BINARY="${HOME}/.local/bin/zenny-core"
 
 # GPU gfx ID override — use if rocminfo reports the wrong ID for your GPU
 # Strix Halo (Radeon 8060S): rocminfo reports gfx1100, real die is gfx1151
@@ -73,7 +64,6 @@ cfg_load() {
     # shellcheck source=/dev/null
     source "$ZMENU_CONFIG_FILE"
     # Propagate config overrides to runtime variables
-    if [[ -n "${ZMENU_ZENNY_BINARY:-}" ]]; then ZENNY_BINARY="$ZMENU_ZENNY_BINARY"; fi
 }
 
 cfg_edit() {

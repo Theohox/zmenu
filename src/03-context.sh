@@ -22,31 +22,6 @@ context_generate() {
 
         echo "## AI Inference Stack"
         echo '```'
-        if [[ "$D_ZENNY_RUNNING" == true ]]; then
-            echo "Zenny-Core: RUNNING (PID ${D_ZENNY_PID:-?})"
-            echo "Socket: ${D_ZENNY_SOCKET}"
-            echo "Models available:"
-            local zenny_full
-            zenny_full=$(_zenny_send '{"cmd":"list_models"}' 2>/dev/null || echo "")
-            if [[ -n "$zenny_full" ]]; then
-                echo "$zenny_full" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    for m in d.get('models',[]):
-        dn=m.get('display_name','?')
-        sz=m.get('size_bytes',0)/(1024**3)
-        tags=','.join(m.get('tags',[])) or 'general'
-        print(f'  - {dn}  ({sz:.1f}G, {tags})')
-except: pass
-" 2>/dev/null || for m in "${D_ZENNY_MODELS[@]}"; do echo "  - $m"; done
-            else
-                for m in "${D_ZENNY_MODELS[@]}"; do echo "  - $m"; done
-            fi
-        else
-            echo "Zenny-Core: STOPPED"
-        fi
-        echo ""
         if [[ "$D_OLLAMA_RUNNING" == true ]]; then
             echo "Ollama: RUNNING at ${D_OLLAMA_URL}"
         else

@@ -507,15 +507,6 @@ mod_ai_engine() {
         echo -e "${BCYN}┄ AI ENGINE ────────────────────────────────────────────${NC}"
         echo ""
 
-        # Zenny-Core status
-        local zenny_label
-        if [[ "$D_ZENNY_RUNNING" == true ]]; then
-            zenny_label="${OK} ${#D_ZENNY_MODELS[@]} model(s)  pid:${D_ZENNY_PID:-?}"
-        else
-            zenny_label="${IDLE} stopped"
-        fi
-        echo -e "  Zenny-Core  ${zenny_label}"
-
         # Lemonade status
         local lemonade_label
         if [[ "$D_LEMONADE_RUNNING" == true ]]; then
@@ -573,16 +564,15 @@ mod_ai_engine() {
         echo -e "  OpenCode    ${oc_label}"
         echo ""
 
-        echo "   1)  Zenny-Core             (model load · unload · benchmark · stats)"
-        echo "   2)  Lemonade               (start · stop · backend status)"
-        echo "   3)  Hermes                 (start · stop · gateway status)"
-        echo "   4)  Ollama                 (start · stop · settings)"
-        echo "   5)  LLM-Gateway            (slot status · metrics · health)"
-        echo "   6)  LM Studio             (model downloader)"
-        echo "   7)  OpenCode              (coding agent · Zed · ACP)"
+        echo "   1)  Lemonade               (start · stop · backend status)"
+        echo "   2)  Hermes                 (start · stop · gateway status)"
+        echo "   3)  Ollama                 (start · stop · settings)"
+        echo "   4)  LLM-Gateway            (slot status · metrics · health)"
+        echo "   5)  LM Studio             (model downloader)"
+        echo "   6)  OpenCode              (coding agent · Zed · ACP)"
         echo ""
-        echo "   8)  Switch model"
-        echo "   9)  AI session             (OpenCode TUI with system context)"
+        echo "   7)  Switch model"
+        echo "   8)  AI session             (OpenCode TUI with system context)"
         echo ""
         echo "   E)  Export report"
         if [[ "${AI_BACKEND_ACTIVE:-none}" != "none" ]]; then
@@ -592,18 +582,17 @@ mod_ai_engine() {
         echo ""
         read -rp "  Selection: " ch
         case $ch in
-            1) _ai_sub_zenny ;;
-            2) _ai_sub_lemonade ;;
-            3) _ai_sub_hermes ;;
-            4) _ai_sub_ollama ;;
-            5) mod_llm_gateway ;;
-            6) _ai_sub_lms ;;
-            7) _ai_sub_opencode ;;
-            8) _ai_switch_model ;;
-            9) cc_launch "AI Stack Assistant" \
+            1) _ai_sub_lemonade ;;
+            2) _ai_sub_hermes ;;
+            3) _ai_sub_ollama ;;
+            4) mod_llm_gateway ;;
+            5) _ai_sub_lms ;;
+            6) _ai_sub_opencode ;;
+            7) _ai_switch_model ;;
+            8) cc_launch "AI Stack Assistant" \
                 "You are an expert on this local AI stack. Review the context and tell me the current state of all AI services, what's working, what could be improved." "$HOME" "--tui" ;;
             E) export_report "AI Engine"; pause ;;
-            C) _cc_inline "AI Engine" _ctx_ai_engine _apply_ai_engine; pause ;;
+            C) _cc_inline "AI Engine" _ctx_ai_engine; pause ;;
             r|R) break ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
         esac
@@ -641,14 +630,14 @@ mod_llm_gateway() {
         echo "   r)  Refresh status"
         echo "   m)  View metrics         (Prometheus counters from /metrics)"
         echo "   h)  Health check         (/health endpoint)"
-        if [[ -n "${ZENNY_ADMIN_KEY:-}" ]]; then
+        if [[ -n "${ZMENU_GATEWAY_ADMIN_KEY:-}" ]]; then
             echo "   s)  Start slot"
             echo "   t)  Stop slot"
             echo "   l)  View logs"
         else
-            echo "   ${DIM}s)  Start slot         (requires ZENNY_ADMIN_KEY env var)${NC}"
-            echo "   ${DIM}t)  Stop slot          (requires ZENNY_ADMIN_KEY env var)${NC}"
-            echo "   ${DIM}l)  View logs          (requires ZENNY_ADMIN_KEY env var)${NC}"
+            echo "   ${DIM}s)  Start slot         (requires ZMENU_GATEWAY_ADMIN_KEY env var)${NC}"
+            echo "   ${DIM}t)  Stop slot          (requires ZMENU_GATEWAY_ADMIN_KEY env var)${NC}"
+            echo "   ${DIM}l)  View logs          (requires ZMENU_GATEWAY_ADMIN_KEY env var)${NC}"
         fi
         echo ""
         echo "   E)  Export report"
@@ -691,7 +680,7 @@ mod_llm_gateway() {
                 pause
                 ;;
             s|S)
-                if [[ -n "${ZENNY_ADMIN_KEY:-}" && "$D_GATEWAY_RUNNING" == true ]]; then
+                if [[ -n "${ZMENU_GATEWAY_ADMIN_KEY:-}" && "$D_GATEWAY_RUNNING" == true ]]; then
                     local _choices=() _map=()
                     for i in "${!D_GATEWAY_SLOTS_VAR[@]}"; do
                         if [[ "${D_GATEWAY_SLOTS_STATE[$i]}" != "Active" ]]; then
@@ -712,7 +701,7 @@ mod_llm_gateway() {
                             echo "  Starting ${_target}..."
                             local _resp
                             _resp=$(curl -sf --max-time 5 -X POST \
-                                -H "x-admin-key: ${ZENNY_ADMIN_KEY}" \
+                                -H "x-admin-key: ${ZMENU_GATEWAY_ADMIN_KEY}" \
                                 "${D_GATEWAY_URL}/admin/slots/${_target}/start" 2>/dev/null || echo "")
                             if [[ -n "$_resp" ]]; then
                                 echo -e "  ${OK}  Start command sent. Refresh to see updated state.${NC}"
@@ -725,7 +714,7 @@ mod_llm_gateway() {
                 fi
                 ;;
             t|T)
-                if [[ -n "${ZENNY_ADMIN_KEY:-}" && "$D_GATEWAY_RUNNING" == true ]]; then
+                if [[ -n "${ZMENU_GATEWAY_ADMIN_KEY:-}" && "$D_GATEWAY_RUNNING" == true ]]; then
                     local _choices=() _map=()
                     for i in "${!D_GATEWAY_SLOTS_VAR[@]}"; do
                         if [[ "${D_GATEWAY_SLOTS_STATE[$i]}" == "Active" ]]; then
@@ -746,7 +735,7 @@ mod_llm_gateway() {
                             echo "  Stopping ${_target}..."
                             local _resp
                             _resp=$(curl -sf --max-time 5 -X POST \
-                                -H "x-admin-key: ${ZENNY_ADMIN_KEY}" \
+                                -H "x-admin-key: ${ZMENU_GATEWAY_ADMIN_KEY}" \
                                 "${D_GATEWAY_URL}/admin/slots/${_target}/stop" 2>/dev/null || echo "")
                             if [[ -n "$_resp" ]]; then
                                 echo -e "  ${OK}  Stop command sent. Refresh to see updated state.${NC}"
@@ -759,7 +748,7 @@ mod_llm_gateway() {
                 fi
                 ;;
             l|L)
-                if [[ -n "${ZENNY_ADMIN_KEY:-}" && "$D_GATEWAY_RUNNING" == true ]]; then
+                if [[ -n "${ZMENU_GATEWAY_ADMIN_KEY:-}" && "$D_GATEWAY_RUNNING" == true ]]; then
                     local _choices=() _map=()
                     for i in "${!D_GATEWAY_SLOTS_VAR[@]}"; do
                         _choices+=("${#_map[@]}) ${D_GATEWAY_SLOTS_VAR[$i]} (${D_GATEWAY_SLOTS_STATE[$i]})")
@@ -774,7 +763,7 @@ mod_llm_gateway() {
                         echo "  Fetching logs for ${_target}..."
                         local _resp
                         _resp=$(curl -sf --max-time 5 \
-                            -H "x-admin-key: ${ZENNY_ADMIN_KEY}" \
+                            -H "x-admin-key: ${ZMENU_GATEWAY_ADMIN_KEY}" \
                             "${D_GATEWAY_URL}/admin/logs/${_target}" 2>/dev/null || echo "")
                         if [[ -n "$_resp" ]]; then
                             echo ""
@@ -817,378 +806,6 @@ _ctx_llm_gateway() {
 }
 
 _apply_llm_gateway() { _apply_generic "$1" "LLM-Gateway"; }
-
-# ── Zenny-Core context function ───────────────────────────
-_ctx_zenny() {
-    printf "Section focus: Zenny-Core inference engine status\n\n"
-    printf "Socket:          %s\n" "$D_ZENNY_SOCKET"
-    printf "Running:         %s\n" "$(${D_ZENNY_RUNNING} && echo "yes (PID ${D_ZENNY_PID:-?})" || echo 'no')"
-    printf "Models loaded:   %s\n" "${#D_ZENNY_MODELS[@]}"
-    for m in "${D_ZENNY_MODELS[@]}"; do printf "  - %s\n" "$m"; done
-    if [[ "$D_ZENNY_RUNNING" == true ]]; then
-        printf "\nStats:\n"
-        local stats_resp
-        stats_resp=$(_zenny_send '{"cmd":"stats"}' 2>/dev/null || echo "")
-        [[ -n "$stats_resp" ]] && echo "$stats_resp" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    for m in d.get('models',[]):
-        print(f'  {m.get(\"name\",\"?\")}  {m.get(\"tok_s\",0):.0f} tok/s')
-except: pass
-" 2>/dev/null || printf "  (no stats)\n"
-    fi
-    printf "\nGPU:             %s  Vulkan backend\n" "${D_GPU_GFX:-?}"
-    printf "Model dir:       %s\n" "${HOME}/.lmstudio/models/"
-}
-
-# ── Zenny-Core sub-menu ────────────────────────────────────
-_ai_sub_zenny() {
-    while true; do
-        header
-        echo -e "${BCYN}┄ ZENNY-CORE ───────────────────────────────────────────${NC}"
-        echo ""
-
-        if [[ "$D_ZENNY_RUNNING" == true ]]; then
-            echo -e "  Status:  ${OK} running  (PID ${D_ZENNY_PID:-?})"
-            echo -e "  Socket:  ${DIM}${D_ZENNY_SOCKET}${NC}"
-            echo -e "  Models:  ${#D_ZENNY_MODELS[@]} available"
-            for m in "${D_ZENNY_MODELS[@]}"; do echo "    · $m"; done
-        else
-            echo -e "  Status:  ${IDLE} stopped"
-            echo -e "  Socket:  ${DIM}${D_ZENNY_SOCKET}${NC}"
-        fi
-        echo ""
-        echo -e "  ${DIM}Binary: ${ZENNY_BINARY}${NC}"
-        echo -e "  ${DIM}Models: ~/.lmstudio/models/${NC}"
-        _zenny_systemd_status
-        echo ""
-
-        echo "   a)  List models            (registry with sizes)"
-        echo "   b)  Load model             (pre-warm into GPU memory)"
-        echo "   c)  Unload model           (free GPU memory)"
-        echo "   d)  Stats                  (tok/s per loaded model)"
-        echo "   e)  Benchmark              (run benchmark on a model)"
-        echo "   f)  Rescan                 (re-scan ~/.lmstudio/models/)"
-        echo "   g)  Start Zenny-Core       (launch process)"
-        echo -e "   h)  ${BRED}Stop Zenny-Core${NC}        (kill process)"
-        echo "   i)  Install as systemd service  (auto-start on boot)"
-        echo ""
-        if [[ "${AI_BACKEND_ACTIVE:-none}" != "none" ]]; then
-            echo "   C)  ✦ Ask AI"
-        fi
-        echo "   r)  Back"
-        echo ""
-        read -rp "  Selection: " ch
-        case $ch in
-            a) _zenny_list_models; pause ;;
-            b) _zenny_load_model; pause ;;
-            c) _zenny_unload_model; pause ;;
-            d) _zenny_stats; pause ;;
-            e) _zenny_benchmark; pause ;;
-            f) _zenny_rescan; pause ;;
-            g) _zenny_start; pause ;;
-            h) _zenny_stop; pause ;;
-            i) _zenny_systemd_install; pause ;;
-            C) _cc_inline "AI Engine" _ctx_ai_engine _apply_ai_engine ;;
-            r|R) break ;;
-            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
-        esac
-    done
-}
-
-_zenny_list_models() {
-    header
-    echo -e "${BCYN}┄ ZENNY-CORE — LIST MODELS${NC}"
-    echo ""
-    if [[ "$D_ZENNY_RUNNING" != true ]]; then
-        echo -e "  ${FAIL}  Zenny-Core not running"; return
-    fi
-    local resp
-    resp=$(_zenny_send '{"cmd":"list_models"}' 2>/dev/null) || { echo -e "  ${FAIL}  No response from socket"; return; }
-    echo "$resp" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    models=d.get('models',[])
-    if not models: print('  No models in registry'); sys.exit()
-    print(f'  {\"NAME\":<40} {\"SIZE\":>8}  TAGS')
-    print(f'  {\"-\"*40} {\"-\"*8}  ----')
-    for m in models:
-        dn=m.get('display_name','?')
-        sz=m.get('size_bytes',0)/(1024**3)
-        tags=','.join(m.get('tags',[])) or 'general'
-        print(f'  {dn:<40} {sz:>6.1f}G  {tags}')
-except Exception as e:
-    print(f'  Error: {e}')
-" 2>/dev/null || echo "  (parse error)"
-}
-
-_zenny_load_model() {
-    header
-    echo -e "${BCYN}┄ ZENNY-CORE — LOAD MODEL${NC}"
-    echo ""
-    if [[ "$D_ZENNY_RUNNING" != true ]]; then
-        echo -e "  ${FAIL}  Zenny-Core not running"; return
-    fi
-    if [[ ${#D_ZENNY_MODELS[@]} -eq 0 ]]; then
-        echo -e "  ${FAIL}  No models in registry — run Rescan first"; return
-    fi
-    local i=1
-    for m in "${D_ZENNY_MODELS[@]}"; do
-        printf "   %d)  %s\n" "$i" "$m"
-        i=$((i + 1))
-    done
-    echo ""
-    echo "   r)  Back    q)  Quit"
-    echo ""
-    read -rp "  Select number: " n
-    if [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -ge 1 ]] && [[ "$n" -le ${#D_ZENNY_MODELS[@]} ]]; then
-        local model="${D_ZENNY_MODELS[$((n-1))]}"
-        echo "  Loading ${model}..."
-        local resp
-        resp=$(_zenny_send "{\"cmd\":\"load_model\",\"name\":\"${model}\"}" 2>/dev/null)
-        echo "$resp" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    if d.get('error'): print(f'  Error: {d[\"error\"]}')
-    else: print('  Loaded OK')
-except: print('  Done')
-" 2>/dev/null || echo -e "  ${WARN}  No response"
-    fi
-}
-
-_zenny_unload_model() {
-    header
-    echo -e "${BCYN}┄ ZENNY-CORE — UNLOAD MODEL${NC}"
-    echo ""
-    if [[ "$D_ZENNY_RUNNING" != true ]]; then
-        echo -e "  ${FAIL}  Zenny-Core not running"; return
-    fi
-    if [[ ${#D_ZENNY_MODELS[@]} -eq 0 ]]; then
-        echo -e "  ${IDLE}  No models in registry"; return
-    fi
-    local i=1
-    for m in "${D_ZENNY_MODELS[@]}"; do
-        printf "   %d)  %s\n" "$i" "$m"
-        i=$((i + 1))
-    done
-    echo ""
-    echo "   r)  Back    q)  Quit"
-    echo ""
-    read -rp "  Select number: " n
-    if [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -ge 1 ]] && [[ "$n" -le ${#D_ZENNY_MODELS[@]} ]]; then
-        local model="${D_ZENNY_MODELS[$((n-1))]}"
-        echo "  Unloading ${model}..."
-        local resp
-        resp=$(_zenny_send "{\"cmd\":\"unload_model\",\"name\":\"${model}\"}" 2>/dev/null)
-        echo "$resp" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    if d.get('error'): print(f'  Error: {d[\"error\"]}')
-    else: print('  Unloaded OK — GPU memory freed')
-except: print('  Done')
-" 2>/dev/null || echo -e "  ${WARN}  No response"
-    fi
-}
-
-_zenny_stats() {
-    header
-    echo -e "${BCYN}┄ ZENNY-CORE — STATS${NC}"
-    echo ""
-    if [[ "$D_ZENNY_RUNNING" != true ]]; then
-        echo -e "  ${FAIL}  Zenny-Core not running"; return
-    fi
-    local resp
-    resp=$(_zenny_send '{"cmd":"stats"}' 2>/dev/null) || { echo -e "  ${FAIL}  No response"; return; }
-    echo "$resp" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    models=d.get('models',[])
-    if not models: print('  No models currently loaded')
-    else:
-        print(f'  {\"MODEL\":<40} {\"TOK/S\":>8}')
-        print(f'  {\"-\"*40} {\"-\"*8}')
-        for m in models:
-            print(f'  {m.get(\"name\",\"?\"):<40} {m.get(\"tok_s\",0):>7.0f}')
-except Exception as e:
-    print(f'  {d}')
-" 2>/dev/null || echo "  (parse error)"
-}
-
-_zenny_benchmark() {
-    header
-    echo -e "${BCYN}┄ ZENNY-CORE — BENCHMARK${NC}"
-    echo ""
-    if [[ "$D_ZENNY_RUNNING" != true ]]; then
-        echo -e "  ${FAIL}  Zenny-Core not running"; return
-    fi
-    if [[ ${#D_ZENNY_MODELS[@]} -eq 0 ]]; then
-        echo -e "  ${FAIL}  No models in registry"; return
-    fi
-    local i=1
-    for m in "${D_ZENNY_MODELS[@]}"; do
-        printf "   %d)  %s\n" "$i" "$m"
-        i=$((i + 1))
-    done
-    echo "   r)  Back"
-    echo ""
-    read -rp "  Select number: " n
-    if [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -ge 1 ]] && [[ "$n" -le ${#D_ZENNY_MODELS[@]} ]]; then
-        local model="${D_ZENNY_MODELS[$((n-1))]}"
-        echo "  Benchmarking ${model} (this may take a moment)..."
-        local resp
-        resp=$(_zenny_send "{\"cmd\":\"benchmark\",\"name\":\"${model}\"}" 2>/dev/null)
-        echo "$resp" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    if d.get('error'): print(f'  Error: {d[\"error\"]}')
-    else:
-        print(f'  tok/s: {d.get(\"tok_s\",\"?\"):.1f}' if isinstance(d.get('tok_s'),float) else f'  Result: {d}')
-except: print(f'  Raw: {resp}')
-" 2>/dev/null || echo -e "  ${WARN}  No response"
-    fi
-}
-
-_zenny_rescan() {
-    header
-    echo -e "${BCYN}┄ ZENNY-CORE — RESCAN${NC}"
-    echo ""
-    if [[ "$D_ZENNY_RUNNING" != true ]]; then
-        echo -e "  ${FAIL}  Zenny-Core not running"; return
-    fi
-    echo "  Rescanning ~/.lmstudio/models/ ..."
-    local resp
-    resp=$(_zenny_send '{"cmd":"rescan"}' 2>/dev/null) || { echo -e "  ${FAIL}  No response"; return; }
-    echo "$resp" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    if d.get('error'): print(f'  Error: {d[\"error\"]}')
-    else: print(f'  Rescan complete — {len(d.get(\"models\",[]))} model(s) found')
-except: print('  Done')
-" 2>/dev/null || echo -e "  ${OK}  Rescan sent"
-    _disc_zenny
-    echo -e "  ${OK}  Registry updated: ${#D_ZENNY_MODELS[@]} model(s)"
-}
-
-_zenny_start() {
-    header
-    echo -e "${BCYN}┄ START ZENNY-CORE${NC}"
-    echo ""
-    # Always do a live check — never rely on cached D_ZENNY_RUNNING here
-    _disc_zenny 2>/dev/null
-    if [[ "$D_ZENNY_RUNNING" == true ]]; then
-        echo -e "  ${OK}  Zenny-Core already running (PID ${D_ZENNY_PID:-?})"; return
-    fi
-    # Extra guard: pgrep in case _disc_zenny missed it
-    if pgrep -x "$ZENNY_PROCESS" >/dev/null 2>&1; then
-        echo -e "  ${WARN}  ${ZENNY_PROCESS} process found but socket not ready — check logs"
-        echo -e "  ${DIM}  tail ${ZENNY_LOG}${NC}"; return
-    fi
-    if [[ ! -x "$ZENNY_BINARY" ]]; then
-        echo -e "  ${FAIL}  Binary not found: ${ZENNY_BINARY}"; return
-    fi
-    echo "  Starting Zenny-Core..."
-    RUST_LOG=zenny_core=info "$ZENNY_BINARY" &>"$ZENNY_LOG" &
-    sleep 2
-    _disc_zenny
-    if [[ "$D_ZENNY_RUNNING" == true ]]; then
-        echo -e "  ${OK}  Zenny-Core started (PID ${D_ZENNY_PID:-?})"
-        echo -e "  ${DIM}  Logs: ${ZENNY_LOG}${NC}"
-    else
-        echo -e "  ${FAIL}  Failed to start — check: tail ${ZENNY_LOG}"
-    fi
-}
-
-_zenny_stop() {
-    header
-    echo -e "${BCYN}┄ STOP ZENNY-CORE${NC}"
-    echo ""
-    if [[ "$D_ZENNY_RUNNING" == false ]]; then
-        echo -e "  ${IDLE}  Zenny-Core is not running"; return
-    fi
-    echo "  Stopping Zenny-Core (PID ${D_ZENNY_PID:-?})..."
-    if [[ -n "$D_ZENNY_PID" ]]; then
-        kill "$D_ZENNY_PID" 2>/dev/null && echo -e "  ${OK}  Stopped" \
-            || echo -e "  ${FAIL}  Could not kill PID ${D_ZENNY_PID}"
-    else
-        pkill -x "$ZENNY_PROCESS" 2>/dev/null && echo -e "  ${OK}  Stopped" \
-            || echo -e "  ${FAIL}  Could not find process"
-    fi
-    D_ZENNY_RUNNING=false
-    D_ZENNY_PID=""
-    D_ZENNY_MODELS=()
-}
-
-# ── Zenny-Core systemd service management ─────────────────
-_ZENNY_SERVICE="zenny-core"
-_ZENNY_SERVICE_FILE="/etc/systemd/system/${_ZENNY_SERVICE}.service"
-
-_zenny_systemd_install() {
-    header
-    echo -e "${BCYN}┄ INSTALL ZENNY-CORE SYSTEMD SERVICE${NC}"
-    echo ""
-    if [[ ! -x "$ZENNY_BINARY" ]]; then
-        echo -e "  ${FAIL}  Binary not found: ${ZENNY_BINARY}"
-        echo -e "  ${DIM}  Build: cargo build --release --features vulkan, then set ZMENU_ZENNY_BINARY in ~/.zmenu/config${NC}"
-        return
-    fi
-    if systemctl is-active --quiet "$_ZENNY_SERVICE" 2>/dev/null; then
-        echo -e "  ${OK}  Service already installed and active"
-        systemctl status "$_ZENNY_SERVICE" --no-pager -l 2>/dev/null | head -10 | sed 's/^/  /'
-        return
-    fi
-    # Validate paths before writing to systemd (prevent injection via config)
-    if [[ "$ZENNY_BINARY" != /* ]] || [[ "$ZENNY_BINARY" == *$'\n'* ]] || [[ "$ZENNY_LOG" == *$'\n'* ]]; then
-        echo -e "  ${FAIL}  Invalid path in ZENNY_BINARY or ZENNY_LOG — aborting"
-        return 1
-    fi
-    echo "  Creating ${_ZENNY_SERVICE_FILE}..."
-    sudo tee "$_ZENNY_SERVICE_FILE" > /dev/null << SVCEOF
-[Unit]
-Description=Zenny-Core local AI inference engine
-After=network.target
-
-[Service]
-Type=simple
-User=${USER}
-ExecStart=${ZENNY_BINARY}
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:${ZENNY_LOG}
-StandardError=append:${ZENNY_LOG}
-Environment=RUST_LOG=zenny_core=info
-
-[Install]
-WantedBy=default.target
-SVCEOF
-    sudo chmod 600 "$_ZENNY_SERVICE_FILE"
-    sudo systemctl daemon-reload
-    sudo systemctl enable "$_ZENNY_SERVICE"
-    sudo systemctl start  "$_ZENNY_SERVICE"
-    sleep 2
-    if systemctl is-active --quiet "$_ZENNY_SERVICE" 2>/dev/null; then
-        echo -e "  ${OK}  Service installed, enabled, and started"
-        echo -e "  ${DIM}  Logs: journalctl -u ${_ZENNY_SERVICE} -f${NC}"
-    else
-        echo -e "  ${FAIL}  Service failed to start — check: journalctl -u ${_ZENNY_SERVICE}"
-    fi
-}
-
-_zenny_systemd_status() {
-    if ! [[ -f "$_ZENNY_SERVICE_FILE" ]]; then
-        echo -e "  ${IDLE}  Systemd service not installed  ${DIM}(use AI Engine → Install as service)${NC}"
-        return
-    fi
-    local state; state=$(systemctl is-active "$_ZENNY_SERVICE" 2>/dev/null || echo "unknown")
-    local enabled; enabled=$(systemctl is-enabled "$_ZENNY_SERVICE" 2>/dev/null || echo "unknown")
-    echo -e "  Systemd:  ${state}  (enabled: ${enabled})"
-}
 
 # ── Lemonade sub-menu ─────────────────────────────────────
 _ai_sub_lemonade() {
@@ -2324,13 +1941,12 @@ _ai_sub_owui() {
 # port: listening port to verify (empty = skip)
 _SCAN_REGISTRY=(
     # ── AI Inference ────────────────────────────────────────
-    "Zenny-Core|${ZENNY_BINARY}|${ZENNY_PROCESS}||unix:${D_ZENNY_SOCKET}|${ZENNY_BINARY}|ai-inference|Local LLM inference engine (Vulkan/llama.cpp, Unix socket)"
-    "Ollama|ollama|ollama|ollama.service|11434|~/.ollama|ai-inference|HTTP-based LLM server (alternative backend)"
+    "Ollama|ollama|ollama|ollama.service|11434|~/.ollama|ai-inference|HTTP-based LLM server (primary backend)"
     "LM Studio||lmstudio||1234|~/.lmstudio|ai-inference|GUI model downloader and inference server"
     "LLM-Gateway|${LLM_GATEWAY_DIR:-/home/hox/projects/llm-gateway}/target/release/llm-gateway|llm-gateway||8090|${LLM_GATEWAY_DIR:-/home/hox/projects/llm-gateway}/config/slots.toml|ai-inference|Rust slot-based LLM gateway (Workhorse, Tiny, Vision, etc.)"
     # ── AI Tools ────────────────────────────────────────────
     "Claude Code|claude|claude|||~/.claude|ai-tools|Anthropic Claude Code CLI agent"
-    "OpenCode|${OPENCODE_BIN}|${OPENCODE_PROCESS}|||${OPENCODE_CFG}|ai-tools|Standalone coding agent CLI (separate from Zenny-Core)"
+    "OpenCode|${OPENCODE_BIN}|${OPENCODE_PROCESS}|||${OPENCODE_CFG}|ai-tools|Standalone coding agent CLI"
     "Open WebUI|docker:open-webui|||3000||ai-tools|Web chat interface for local models (Docker)"
     "Crawl4AI|docker:crawl4ai|||11235||ai-tools|AI-powered web scraper (Docker)"
     "n8n|docker:n8n|||5678|~/.n8n|ai-tools|Workflow automation (Docker)"
@@ -2420,7 +2036,7 @@ _scan_entry() {
             fi
         fi
 
-        # ── Unix socket check (zenny-core) ────────────────
+        # ── Unix socket check ─────────────────────────────
         if [[ "$port" == unix:* ]]; then
             local sock="${port#unix:}"
             [[ -S "$sock" ]] && is_running=true
@@ -2747,8 +2363,6 @@ _scan_app_start() {
     elif [[ -n "$svc" ]]; then
         sudo systemctl start "$svc" 2>/dev/null \
             && echo -e "  ${OK}  Started: ${svc}" || echo -e "  ${FAIL}  Failed (may need sudo password)"
-    elif [[ "$name" == "Zenny-Core" ]]; then
-        _zenny_start
     else
         echo -e "  ${IDLE}  No start handler for ${name} — use the dedicated module"
     fi
@@ -2764,8 +2378,6 @@ _scan_app_stop() {
     elif [[ -n "$svc" ]]; then
         sudo systemctl stop "$svc" 2>/dev/null \
             && echo -e "  ${OK}  Stopped: ${svc}" || echo -e "  ${FAIL}  Failed"
-    elif [[ "$name" == "Zenny-Core" ]]; then
-        _zenny_stop
     elif [[ "$name" == "OpenCode" ]]; then
         _opencode_stop
     elif [[ -n "$process" ]]; then
@@ -2886,7 +2498,7 @@ _scan_packages() {
             fi
         fi
 
-        echo -e "  ${DIM}Use C) to ask Zenny: what's deprecated, what's bloat, what can be removed safely.${NC}"
+        echo -e "  ${DIM}Use C) to ask the AI: what's deprecated, what's bloat, what can be removed safely.${NC}"
         echo ""
         echo "   r)  Back"
         if [[ "${AI_BACKEND_ACTIVE:-none}" != "none" ]]; then
@@ -4345,40 +3957,29 @@ _ai_backend_picker() {
         echo -e "  Active now:  ${BOLD}${AI_BACKEND_LABEL:-none}${NC}  ${DIM}(runtime status — see AI Engine module)${NC}"
         echo ""
 
-        local z_status oc_status ol_status
-        [[ "$D_ZENNY_RUNNING" == true ]] \
-            && z_status="${OK} running  ${#D_ZENNY_MODELS[@]} model(s)" \
-            || z_status="${IDLE} stopped"
+        local oc_status ol_status
         if pgrep -x "$OPENCODE_PROCESS" >/dev/null 2>&1; then
-            oc_status="${OK} RUNNING  (TUI-only — inline chat uses Zenny)"
+            oc_status="${OK} RUNNING  (TUI-only — not for inline chat)"
         elif _opencode_available; then
             oc_status="${IDLE} installed (not running)"
         else
             oc_status="${IDLE} not installed"
         fi
         [[ "$D_OLLAMA_RUNNING" == true ]] \
-            && ol_status="${WARN} running" \
+            && ol_status="${OK} running  ${D_OLLAMA_ACTIVE_MODEL:-}" \
             || ol_status="${IDLE} stopped"
 
-        # Show current chat model
-        local chat_model_display="${ZMENU_ZENNY_CHAT_MODEL:-auto (${ZMENU_AI_MODEL##*/})}"
-
-        echo -e "   1)  auto       — best available (Zenny → Ollama)"
-        echo -e "   2)  zenny      ${z_status}"
-        echo -e "   3)  opencode   ${oc_status}"
-        echo -e "   4)  ollama     ${ol_status}"
-        echo ""
-        echo -e "   z)  Zenny chat model  ${DIM}(current: ${chat_model_display})${NC}"
+        echo -e "   1)  auto       — best available (Ollama → OpenCode)"
+        echo -e "   2)  opencode   ${oc_status}"
+        echo -e "   3)  ollama     ${ol_status}"
         echo ""
         echo -e "   r)  Back    q)  Quit zmenu"
         echo ""
         read -rp "  Selection: " ch
         case $ch in
             1) _ai_backend_set "auto"     ;;
-            2) _ai_backend_set "zenny"    ;;
-            3) _ai_backend_set "opencode" ;;
-            4) _ai_backend_set "ollama"   ;;
-            z) _ai_zenny_chat_model_pick; pause ;;
+            2) _ai_backend_set "opencode" ;;
+            3) _ai_backend_set "ollama"   ;;
             r|R) break ;;
             q|Q) printf '
 %b  Sovereign. Signing off.%b
@@ -4400,49 +4001,6 @@ _ai_backend_set() {
     _sel_ai_backend
     echo -e "  ${OK}  Backend preference: ${backend}  →  active: ${AI_BACKEND_LABEL}"
     sleep 1
-}
-
-_ai_zenny_chat_model_pick() {
-    header
-    echo -e "${BCYN}┄ ZENNY CHAT MODEL${NC}"
-    echo ""
-    echo -e "  ${DIM}This model is used for all inline 'Ask AI' sessions.${NC}"
-    echo -e "  ${DIM}Pick a smaller/faster model for quick questions.${NC}"
-    echo ""
-    if [[ ${#D_ZENNY_KEYS[@]} -eq 0 ]]; then
-        echo -e "  ${FAIL}  Zenny-Core not running or no models found"; return
-    fi
-    echo "   0)  auto  (smallest available model)"
-    local i=1
-    for key in "${D_ZENNY_KEYS[@]}"; do
-        local disp="${D_ZENNY_MODELS[$((i-1))]:-$key}"
-        local marker=""
-        [[ "$key" == "$ZMENU_ZENNY_CHAT_MODEL" ]] && marker=" ${DIM}← current${NC}"
-        [[ -z "$ZMENU_ZENNY_CHAT_MODEL" && "$key" == "$(_zenny_pick_chat_model)" ]] \
-            && marker=" ${DIM}← auto-selected${NC}"
-        printf "   %d)  %-45s %b\n" "$i" "$disp" "$marker"
-        i=$((i + 1))
-    done
-    echo "   r)  Back"
-    echo ""
-    read -rp "  Select (0-$((i-1))): " n
-    local chosen=""
-    if [[ "$n" == "0" ]]; then
-        chosen=""
-        echo -e "  ${OK}  Auto-select enabled (will pick smallest available)"
-    elif [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -ge 1 ]] && [[ "$n" -lt $i ]]; then
-        chosen="${D_ZENNY_KEYS[$((n-1))]}"
-        echo -e "  ${OK}  Chat model: ${chosen}"
-    else
-        echo -e "${RED}  Invalid.${NC}"; return
-    fi
-    if grep -q '^ZMENU_ZENNY_CHAT_MODEL=' "$ZMENU_CONFIG_FILE" 2>/dev/null; then
-        sed -i "s|^ZMENU_ZENNY_CHAT_MODEL=.*|ZMENU_ZENNY_CHAT_MODEL=\"${chosen}\"|" "$ZMENU_CONFIG_FILE"
-    else
-        printf '\nZMENU_ZENNY_CHAT_MODEL="%s"\n' "$chosen" >> "$ZMENU_CONFIG_FILE"
-    fi
-    ZMENU_ZENNY_CHAT_MODEL="$chosen"
-    _sel_ai_backend
 }
 
 
@@ -4486,7 +4044,7 @@ mod_settings() {
         echo "   f)  Setup passwordless Ollama"
         echo ""
         echo -e "  ${BOLD}AI${NC}"
-        echo "   l)  AI Backend               (Zenny · OpenCode · Ollama)"
+        echo "   l)  AI Backend               (OpenCode · Ollama)"
         echo "   w)  Sovereign Wiki            (view · refresh knowledge base)"
         echo ""
         echo -e "  ${BOLD}AI Inspector${NC}"
@@ -4942,8 +4500,8 @@ _menu_help_main() {
     echo "                      number + K for SIGKILL (e.g. 5K),"
     echo "                      number + i for process info (e.g. 2i)."
     echo ""
-    echo "  2) AI Engine      — Manage inference backends (Zenny-Core,"
-    echo "                      Ollama, OpenCode, LLM-Gateway)."
+    echo "  2) AI Engine      — Manage inference backends (Ollama,"
+    echo "                      OpenCode, LLM-Gateway, Lemonade, Hermes)."
     echo "                      Start, stop, load/unload models, benchmark."
     echo ""
     echo "  3) Docker         — Start/stop Docker, view containers,"

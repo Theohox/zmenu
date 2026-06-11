@@ -83,18 +83,11 @@ required** — all dashboard features work standalone.
 
 | Tool | Discovery | Notes |
 |------|-----------|-------|
-| **Zenny-Core** | `~/.local/bin/zenny-core` + socket | Primary GPU-accelerated inference backend |
-| **Ollama** | Port 11434 + process check | Alternative backend with broader model support |
+| **Ollama** | Port 11434 + process check | Primary inference backend |
 | **OpenCode** | `~/.opencode/bin/opencode` | TUI coding agent |
 | **LM Studio** | Port 1234 | Monitored only (status, model dir size) |
 | **Claude Code** | `claude` on `$PATH` | Discovered as installed app only |
 | **LLM-Gateway** | Port 8090 | Local gateway for model routing |
-
-### Zenny-Core
-
-Zenny-Core is the recommended inference backend for zmenu. It runs as a Unix socket server
-(`/tmp/zenny-core.sock`) and provides fast GPU-accelerated inference with automatic model
-loading/unloading. The AI Engine menu can start, stop, load models, and run benchmarks.
 
 ### Ollama on Strix Halo
 
@@ -151,14 +144,6 @@ Every screen gives you actions. No dead ends.
 ### 2) AI Engine
 Optional management panel for local inference tools:
 
-**Zenny-Core sub-menu:**
-- Start / stop Zenny-Core daemon
-- Load / unload models
-- Live stats: tok/s, loaded models, VRAM usage
-- Benchmark any loaded model
-- Rescan model registry
-- Install as systemd service
-
 **Ollama sub-menu:**
 - Start / stop Ollama
 - Switch loaded model
@@ -204,7 +189,7 @@ Registry-driven inventory of every tool and service on the machine:
 - Unknown processes scan — processes not in the registry, risk-tiered
 - Export full scan report to markdown
 
-Default registry includes: Zenny-Core, Ollama, LM Studio, Claude Code, OpenCode, Lemonade, Hermes,
+Default registry includes: Ollama, LM Studio, Claude Code, OpenCode, Lemonade, Hermes,
 Open WebUI, Crawl4AI, n8n, SearXNG, Tailscale, OpenVPN, Docker, Node.js, Python3, Rust/Cargo, pip3.
 
 Adding a new app: one line in the `_SCAN_REGISTRY` array. Scanner and wiki pick it up automatically.
@@ -252,7 +237,7 @@ Project-aware workspace:
 
 ## Apply Engine
 
-When using an AI backend (Zenny-Core), you can type `apply` after the AI gives a suggestion, and
+When using an AI backend (Ollama), you can type `apply` after the AI gives a suggestion, and
 zmenu extracts the shell commands from the AI's last response and runs them.
 
 **Safety model:**
@@ -392,8 +377,7 @@ zmenu --export
 - `htop`, `smartmontools`, `lshw`
 
 **Optional AI tools** (not required for any dashboard feature):
-- Zenny-Core (primary GPU inference backend)
-- Ollama (alternative backend)
+- Ollama (primary inference backend)
 - OpenCode (TUI coding agent)
 
 ---
@@ -403,11 +387,8 @@ zmenu --export
 `~/.zmenu/config` is created on first run. Key settings:
 
 ```bash
-# AI backend: auto | zenny | opencode | ollama
+# AI backend: auto | opencode | ollama
 ZMENU_AI_BACKEND="auto"
-
-# Zenny-Core binary path
-ZMENU_ZENNY_BINARY="${HOME}/.local/bin/zenny-core"
 
 # GPU gfx ID override — required if rocminfo reports wrong ID
 # Strix Halo: rocminfo reports gfx1100, real die is gfx1151

@@ -69,12 +69,6 @@ export_report() {
         echo ""
 
         echo "## AI Stack"
-        if [[ "$D_ZENNY_RUNNING" == true ]]; then
-            echo "- Zenny-Core: RUNNING (PID ${D_ZENNY_PID:-?})"
-            echo "- Models: ${D_ZENNY_MODELS[*]:-none}"
-        else
-            echo "- Zenny-Core: STOPPED"
-        fi
         if [[ "$D_GATEWAY_RUNNING" == true ]]; then
             echo "- LLM-Gateway: RUNNING at ${D_GATEWAY_URL} (v${D_GATEWAY_VER})"
             local _gi
@@ -147,21 +141,6 @@ dashboard() {
     _sparkline_read "load1" "$_pts" || true
     [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_load=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
 
-    # ── AI Engine (computed early, rendered last) ─────────
-    local _zenny _zenny_info
-    local _zenny_instances; _zenny_instances=$(pgrep -x "$ZENNY_PROCESS" 2>/dev/null | wc -l) || true
-    if [[ "$D_ZENNY_RUNNING" == true ]]; then
-        if [[ "$_zenny_instances" -gt 1 ]]; then
-            _zenny=$WARN
-            _zenny_info="${#D_ZENNY_MODELS[@]} model(s)  pid:${D_ZENNY_PID:-?}  ${_zenny_instances} instances"
-        else
-            _zenny=$OK
-            _zenny_info="${#D_ZENNY_MODELS[@]} model(s)  pid:${D_ZENNY_PID:-?}"
-        fi
-    else
-        _zenny=$IDLE; _zenny_info="stopped"
-    fi
-
     local _olla _olla_info
     if [[ "$D_OLLAMA_RUNNING" == true ]]; then
         _olla=$OK; _olla_info="running at ${D_OLLAMA_URL}"
@@ -186,25 +165,6 @@ dashboard() {
     local mem_consumers
     mem_consumers=$(ps aux --sort=-rss 2>/dev/null \
         | awk 'NR>1 && NR<=6{printf "      %-18s %5.0f MB\n", $11, $6/1024}' || true)
-
-    # Zenny-Core loaded models / tok/s
-    local zenny_loaded=""
-    if [[ "$D_ZENNY_RUNNING" == true ]]; then
-        local stats_resp
-        stats_resp=$(_zenny_send '{"cmd":"stats"}' 2>/dev/null || echo "")
-        if [[ -n "$stats_resp" ]]; then
-            zenny_loaded=$(echo "$stats_resp" | python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.stdin.read())
-    for m in d.get('models',[]):
-        name=m.get('name','?')
-        toks=m.get('tok_s',0)
-        print(f'      Zenny: {name}  {toks:.0f} tok/s')
-except: pass
-" 2>/dev/null || true)
-        fi
-    fi
 
     # Swap
     local _swap
@@ -370,7 +330,6 @@ except: pass
             else if (cmd ~ /Hermes|hermes_cli|hermes.*gateway/) grp="Hermes"
             else if (cmd ~ /docker|containerd/) grp="Docker"
             else if (cmd ~ /zed|zeditor/) grp="Zed"
-            else if (cmd ~ /zenny-core/) grp="Zenny"
             else if (cmd ~ /ollama/) grp="Ollama"
             else if (cmd ~ /python.*gateway|llm-gateway/) grp="LLM-Gateway"
             else grp=cmd
@@ -401,15 +360,12 @@ except: pass
 
     # AI Engine — last, collapsible (only if any backend is running)
     local _ai_any=false
-    if [[ "$D_ZENNY_RUNNING" == true || "$D_OLLAMA_RUNNING" == true || \
+    if [[ "$D_OLLAMA_RUNNING" == true || \
           "$D_LMS_RUNNING" == true || "$D_CLAUDE_SESSION" == true || \
           "$D_GATEWAY_RUNNING" == true ]] || \
        pgrep -x "$OPENCODE_PROCESS" >/dev/null 2>&1; then
         echo -e "  ${BOLD}AI Engine${NC}"
         _ai_any=true
-    fi
-    if [[ "$D_ZENNY_RUNNING" == true ]]; then
-        echo -e "    Zenny-Core  ${_zenny}  ${_zenny_info}"
     fi
     if [[ "$D_CLAUDE_SESSION" == true ]]; then
         echo -e "    Claude Code ${OK}  session active  v${D_CLAUDE_VER}"
