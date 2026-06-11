@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  —  Built 2026-06-11 08:13:36
+#  Z-MENU  —  Built 2026-06-11 08:28:39
 #  Auto-generated from src/*.sh — edit sources, not this file
 #  Build: ./build.sh
 # ============================================================
@@ -43,7 +43,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.13.5"
+readonly ZMENU_VERSION="5.13.6"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
@@ -298,9 +298,15 @@ _disc_build_port_map() {
         [[ -n "$line" ]] && D_PORT_OWNER_MAP+=("$line")
     done < <(ss -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {
         n=split($4,a,":"); port=a[n]
-        if (match($0, /users:\(\("([^"]+)",pid=([0-9]+)/, m)) {
-            cmd=m[1]; gsub(/.*\//, "", cmd); gsub(/:.*/, "", cmd)
-            print port "|" cmd
+        for (i=1; i<=NF; i++) {
+            if ($i ~ /users:/) {
+                field=$i
+                sub(/users:\(\("/, "", field)
+                sub(/".*/, "", field)
+                sub(/.*\//, "", field)
+                if (field != "") print port "|" field
+                break
+            }
         }
     }' | sort -t'|' -k1 -n -u || true)
 }

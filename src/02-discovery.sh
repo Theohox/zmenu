@@ -120,9 +120,15 @@ _disc_build_port_map() {
         [[ -n "$line" ]] && D_PORT_OWNER_MAP+=("$line")
     done < <(ss -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {
         n=split($4,a,":"); port=a[n]
-        if (match($0, /users:\(\("([^"]+)",pid=([0-9]+)/, m)) {
-            cmd=m[1]; gsub(/.*\//, "", cmd); gsub(/:.*/, "", cmd)
-            print port "|" cmd
+        for (i=1; i<=NF; i++) {
+            if ($i ~ /users:/) {
+                field=$i
+                sub(/users:\(\("/, "", field)
+                sub(/".*/, "", field)
+                sub(/.*\//, "", field)
+                if (field != "") print port "|" field
+                break
+            }
         }
     }' | sort -t'|' -k1 -n -u || true)
 }
