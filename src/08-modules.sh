@@ -39,8 +39,8 @@ mod_find_problems() {
             f) _bp_storage; pause ;;
             g) _bp_thermals; pause ;;
             h) _bp_kernel ;;
-            E) _bp_full_sweep 2>&1 | tee /tmp/zmenu-bp.txt >/dev/null
-               export_report "Find Problems" "$(cat /tmp/zmenu-bp.txt 2>/dev/null)"; pause ;;
+            E) _bp_full_sweep 2>&1 | tee "${ZMENU_TMP_DIR}/zmenu-bp.txt" >/dev/null
+               export_report "Find Problems" "$(cat "${ZMENU_TMP_DIR}/zmenu-bp.txt" 2>/dev/null)"; pause ;;
             C) _cc_inline "Find Problems" _ctx_find_problems _apply_find_problems; pause ;;
             r|R) break ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
@@ -131,7 +131,8 @@ _bp_memory() {
     _disc_memory
 
     # RAM pressure
-    local mem_pct=$((D_MEM_USED_MB * 100 / D_MEM_TOTAL_MB))
+    local mem_pct=0
+    [[ "${D_MEM_TOTAL_MB:-0}" -gt 0 ]] && mem_pct=$((D_MEM_USED_MB * 100 / D_MEM_TOTAL_MB))
     if [[ $mem_pct -gt 90 ]]; then
         _bp_finding "crit" "RAM pressure: ${mem_pct}% used (${D_MEM_USED_MB}/${D_MEM_TOTAL_MB} MB)" \
             "System is nearly out of RAM. This causes swapping which destroys performance." \
@@ -885,6 +886,54 @@ _ctx_llm_gateway() {
 
 _apply_llm_gateway() { _apply_generic "$1" "LLM-Gateway"; }
 
+# ── Lemonade helpers ──────────────────────────────────────
+_ai_start_lemonade() {
+    header
+    echo -e "${BCYN}┄ START LEMONADE ───────────────────────────────────────${NC}"
+    echo ""
+    if [[ "$D_LEMONADE_RUNNING" == true ]]; then
+        echo -e "  ${OK}  Lemonade is already running at port ${D_LEMONADE_PORT:-?}"
+        return
+    fi
+    local _bin
+    _bin=$(command -v "${ZMENU_LEMONADE_BIN:-lemond}" 2>/dev/null || echo "")
+    if [[ -z "$_bin" ]]; then
+        echo -e "  ${FAIL}  ${ZMENU_LEMONADE_BIN:-lemond} not found on PATH"
+        echo -e "  ${DIM}  Override with ZMENU_LEMONADE_BIN in ~/.zmenu/config${NC}"
+        return
+    fi
+    echo "  Starting Lemonade..."
+    nohup "$_bin" > "${ZMENU_TMP_DIR}/lemonade.log" 2>&1 &
+    sleep 3
+    _disc_lemonade
+    if [[ "$D_LEMONADE_RUNNING" == true ]]; then
+        echo -e "  ${OK}  Lemonade started (port ${D_LEMONADE_PORT:-?})"
+    else
+        echo -e "  ${FAIL}  Lemonade did not start (see ${ZMENU_TMP_DIR}/lemonade.log)"
+    fi
+    sleep 1
+}
+
+_ai_lemonade_cli() {
+    local _title="$1"
+    shift
+    header
+    echo -e "${BCYN}┄ ${_title} ──────────────────────────────────────────────${NC}"
+    echo ""
+    local _cli
+    _cli=$(command -v lemonade 2>/dev/null || echo "")
+    if [[ -z "$_cli" ]]; then
+        echo -e "  ${FAIL}  lemonade CLI not found on PATH"
+        return
+    fi
+    if [[ "$D_LEMONADE_RUNNING" != true ]]; then
+        echo -e "  ${FAIL}  Lemonade server is not running"
+        return
+    fi
+    LEMONADE_PORT="${D_LEMONADE_PORT:-8090}" "$_cli" "$@" 2>&1 | sed 's/^/  /' || true
+    echo ""
+}
+
 # ── Lemonade sub-menu ─────────────────────────────────────
 _ai_sub_lemonade() {
     while true; do
@@ -906,32 +955,152 @@ _ai_sub_lemonade() {
             fi
         else
             echo -e "  Status:  ${IDLE} stopped"
-            echo -e "  ${DIM}Start manually: lemond (or your lemonade startup script)${NC}"
+            echo -e "  ${DIM}Start: lemond (or your lemonade startup script)${NC}"
         fi
         echo ""
+        if [[ "$D_LEMONADE_RUNNING" == true ]]; then
+            echo -e "   s)  ${BRED}Stop Lemonade${NC}          (SIGTERM all lemonade processes)"
+            echo "   l)  List downloaded models"
+            echo "   u)  Unload model         (free VRAM, keep server running)"
+            echo "   e)  Backend recipes"
+        else
+            echo -e "   s)  ${BGRN}Start Lemonade${NC}         (lemond in background)"
+        fi
         echo "   r)  Refresh status"
-        echo -e "   s)  ${BRED}Stop Lemonade${NC}          (SIGTERM all lemonade processes)"
-        echo "   b)  Back    q)  Quit zmenu"
+        echo ""
+        echo "   E)  Export    b)  Back    q)  Quit zmenu"
+        if [[ "${AI_BACKEND_ACTIVE:-none}" != "none" ]]; then
+            echo "   C)  ✦ Ask AI"
+        fi
         echo ""
         read -rp "  Selection: " ch
         case $ch in
-            r|R) _disc_lemonade >/dev/null 2>&1 || true ;;
             s|S)
-                if confirm "Stop all Lemonade processes?"; then
-                    pkill -x "lemond" 2>/dev/null || true
-                    pkill -x "llama-server" 2>/dev/null || true
-                    pkill -x "sd-server" 2>/dev/null || true
-                    pkill -x "whisper-server" 2>/dev/null || true
-                    pkill -x "kokoro-server" 2>/dev/null || true
-                    pkill -x "koko" 2>/dev/null || true
-                    echo -e "  ${OK}  Stop signal sent"
-                    sleep 1
+                if [[ "$D_LEMONADE_RUNNING" == true ]]; then
+                    if confirm "Stop all Lemonade processes?"; then
+                        pkill -x "lemond" 2>/dev/null || true
+                        pkill -x "llama-server" 2>/dev/null || true
+                        pkill -x "sd-server" 2>/dev/null || true
+                        pkill -x "whisper-server" 2>/dev/null || true
+                        pkill -x "kokoro-server" 2>/dev/null || true
+                        pkill -x "koko" 2>/dev/null || true
+                        echo -e "  ${OK}  Stop signal sent"
+                        sleep 1
+                    fi
+                else
+                    _ai_start_lemonade
                 fi ;;
+            l|L) _ai_lemonade_cli "LEMONADE MODELS" list --downloaded; pause ;;
+            u|U) _ai_lemonade_cli "UNLOAD LEMONADE MODEL" unload; pause ;;
+            e) _ai_lemonade_cli "LEMONADE BACKENDS" backends; pause ;;
+            r|R) _disc_lemonade >/dev/null 2>&1 || true ;;
+            E) export_report "Lemonade"; pause ;;
+            C) _cc_inline "Lemonade" _ctx_lemonade _apply_lemonade; pause ;;
             b|"") break ;;
             q|Q) printf '\n%b  Sovereign. Signing off.%b\n\n' "${BGRN}" "${NC}"; exit 0 ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 0.5 ;;
         esac
     done
+}
+
+
+# ── Hermes helpers ────────────────────────────────────────
+_ai_start_hermes_gateway() {
+    header
+    echo -e "${BCYN}┄ START HERMES GATEWAY ─────────────────────────────────${NC}"
+    echo ""
+    if [[ -n "$D_HERMES_GATEWAY_PID" ]]; then
+        echo -e "  ${OK}  Hermes gateway is already running (pid ${D_HERMES_GATEWAY_PID})"
+        return
+    fi
+    local _bin
+    _bin=$(command -v "${ZMENU_HERMES_BIN:-hermes}" 2>/dev/null || echo "")
+    if [[ -z "$_bin" ]]; then
+        echo -e "  ${FAIL}  ${ZMENU_HERMES_BIN:-hermes} not found on PATH"
+        echo -e "  ${DIM}  Override with ZMENU_HERMES_BIN in ~/.zmenu/config${NC}"
+        return
+    fi
+    echo "  Starting Hermes gateway..."
+    nohup "$_bin" gateway run --accept-hooks > "${ZMENU_TMP_DIR}/hermes-gateway.log" 2>&1 &
+    sleep 3
+    _disc_hermes
+    if [[ -n "$D_HERMES_GATEWAY_PID" ]]; then
+        echo -e "  ${OK}  Hermes gateway started (pid ${D_HERMES_GATEWAY_PID})"
+    else
+        echo -e "  ${FAIL}  Hermes gateway did not start (see ${ZMENU_TMP_DIR}/hermes-gateway.log)"
+    fi
+    sleep 1
+}
+
+_ai_start_hermes_cli() {
+    header
+    echo -e "${BCYN}┄ START HERMES CLI/TUI ─────────────────────────────────${NC}"
+    echo ""
+    if [[ -n "$D_HERMES_CLI_PID" ]]; then
+        echo -e "  ${OK}  Hermes CLI/TUI is already running (pid ${D_HERMES_CLI_PID})"
+        return
+    fi
+    local _bin
+    _bin=$(command -v "${ZMENU_HERMES_BIN:-hermes}" 2>/dev/null || echo "")
+    if [[ -z "$_bin" ]]; then
+        echo -e "  ${FAIL}  ${ZMENU_HERMES_BIN:-hermes} not found on PATH"
+        return
+    fi
+    echo "  Starting Hermes TUI in background..."
+    nohup "$_bin" --tui > "${ZMENU_TMP_DIR}/hermes-cli.log" 2>&1 &
+    sleep 2
+    _disc_hermes
+    if [[ -n "$D_HERMES_CLI_PID" ]]; then
+        echo -e "  ${OK}  Hermes TUI started (pid ${D_HERMES_CLI_PID})"
+    else
+        echo -e "  ${FAIL}  Hermes TUI did not start (see ${ZMENU_TMP_DIR}/hermes-cli.log)"
+    fi
+    sleep 1
+}
+
+_ai_start_hermes_desktop() {
+    header
+    echo -e "${BCYN}┄ START HERMES DESKTOP ─────────────────────────────────${NC}"
+    echo ""
+    if [[ -n "$D_HERMES_DESKTOP_PID" ]]; then
+        echo -e "  ${OK}  Hermes Desktop is already running (pid ${D_HERMES_DESKTOP_PID})"
+        return
+    fi
+    local _bin
+    _bin=$(command -v hermes-desktop 2>/dev/null || echo "")
+    if [[ -z "$_bin" ]]; then
+        echo -e "  ${FAIL}  hermes-desktop not found on PATH"
+        echo -e "  ${DIM}  Expected: ~/.local/bin/hermes-desktop${NC}"
+        return
+    fi
+    echo "  Starting Hermes Desktop..."
+    nohup "$_bin" > "${ZMENU_TMP_DIR}/hermes-desktop.log" 2>&1 &
+    sleep 3
+    _disc_hermes
+    if [[ -n "$D_HERMES_DESKTOP_PID" ]]; then
+        echo -e "  ${OK}  Hermes Desktop started (pid ${D_HERMES_DESKTOP_PID})"
+    else
+        echo -e "  ${FAIL}  Hermes Desktop did not start (see ${ZMENU_TMP_DIR}/hermes-desktop.log)"
+    fi
+    sleep 1
+}
+
+_ai_stop_hermes() {
+    header
+    echo -e "${BCYN}┄ STOP HERMES ──────────────────────────────────────────${NC}"
+    echo ""
+    if [[ "$D_HERMES_RUNNING" != true ]]; then
+        echo -e "  ${IDLE}  Hermes is not running"
+        return
+    fi
+    if confirm "Stop all Hermes processes?"; then
+        pkill -f "Hermes" 2>/dev/null || true
+        pkill -x "hermes" 2>/dev/null || true
+        pkill -f "hermes gateway" 2>/dev/null || true
+        pkill -f "hermes-desktop" 2>/dev/null || true
+        echo -e "  ${OK}  Stop signal sent"
+        sleep 1
+    fi
 }
 
 # ── Hermes sub-menu ───────────────────────────────────────
@@ -945,28 +1114,40 @@ _ai_sub_hermes() {
         if [[ "$D_HERMES_RUNNING" == true ]]; then
             echo -e "  Status:  ${OK} running"
             [[ -n "$D_HERMES_DESKTOP_PID" ]] && echo -e "    Desktop  ${OK}  pid ${D_HERMES_DESKTOP_PID}"
-            [[ -n "$D_HERMES_CLI_PID" ]]     && echo -e "    CLI      ${OK}  pid ${D_HERMES_CLI_PID}"
+            [[ -n "$D_HERMES_CLI_PID" ]]     && echo -e "    CLI/TUI  ${OK}  pid ${D_HERMES_CLI_PID}"
             [[ -n "$D_HERMES_GATEWAY_PID" ]] && echo -e "    Gateway  ${OK}  pid ${D_HERMES_GATEWAY_PID}"
         else
             echo -e "  Status:  ${IDLE} stopped"
-            echo -e "  ${DIM}Start manually: hermes_cli or your hermes startup script${NC}"
+            echo -e "  ${DIM}Start: hermes gateway run (or hermes for interactive TUI)${NC}"
         fi
         echo ""
+        if [[ "$D_HERMES_RUNNING" == true ]]; then
+            echo -e "   s)  ${BRED}Stop Hermes${NC}            (SIGTERM all hermes processes)"
+        else
+            echo -e "   s)  ${BGRN}Start Hermes gateway${NC}   (hermes gateway run in background)"
+        fi
+        echo "   c)  Start Hermes CLI/TUI  (hermes --tui in background)"
+        echo "   d)  Start Hermes Desktop  (Electron app via hermes-desktop)"
         echo "   r)  Refresh status"
-        echo -e "   s)  ${BRED}Stop Hermes${NC}            (SIGTERM all hermes processes)"
-        echo "   b)  Back    q)  Quit zmenu"
+        echo ""
+        echo "   E)  Export    b)  Back    q)  Quit zmenu"
+        if [[ "${AI_BACKEND_ACTIVE:-none}" != "none" ]]; then
+            echo "   C)  ✦ Ask AI"
+        fi
         echo ""
         read -rp "  Selection: " ch
         case $ch in
-            r|R) _disc_hermes >/dev/null 2>&1 || true ;;
             s|S)
-                if confirm "Stop all Hermes processes?"; then
-                    pkill -f "Hermes" 2>/dev/null || true
-                    pkill -x "hermes_cli" 2>/dev/null || true
-                    pkill -f "python.*hermes.*gateway" 2>/dev/null || true
-                    echo -e "  ${OK}  Stop signal sent"
-                    sleep 1
+                if [[ "$D_HERMES_RUNNING" == true ]]; then
+                    _ai_stop_hermes
+                else
+                    _ai_start_hermes_gateway
                 fi ;;
+            c|C) _ai_start_hermes_cli ;;
+            d|D) _ai_start_hermes_desktop ;;
+            r|R) _disc_hermes >/dev/null 2>&1 || true ;;
+            E) export_report "Hermes"; pause ;;
+            C) _cc_inline "Hermes" _ctx_hermes _apply_hermes; pause ;;
             b|"") break ;;
             q|Q) printf '\n%b  Sovereign. Signing off.%b\n\n' "${BGRN}" "${NC}"; exit 0 ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 0.5 ;;
@@ -1050,7 +1231,7 @@ except: pass
             3) _oc_configure_ollama; pause ;;
             4)
                 mkdir -p "${OPENCODE_CFG}"
-                ${ZMENU_PREFERRED_EDITOR} "${OPENCODE_CFG}/opencode.json"
+                _run_editor "${OPENCODE_CFG}/opencode.json"
                 pause ;;
             5)
                 if [[ -n "$oc_cmd" ]]; then
@@ -1215,13 +1396,6 @@ except: pass
     done
 }
 
-# ── Helper: read a single env var from the active systemd unit ──
-_ollama_get_env() {
-    # Usage: _ollama_get_env VARNAME
-    sudo systemctl show ollama --property=Environment 2>/dev/null \
-        | grep -o "${1}=[^ ]*" | cut -d= -f2 || echo "–"
-}
-
 # ── Helper: read a single env var from override.conf (set value) ──
 _ollama_get_override() {
     local key="$1"
@@ -1352,7 +1526,8 @@ Environment="DO_NOT_TRACK=1"
 Environment="OLLAMA_NOPRUNE=1"
 OLLAMAEOF
     fi
-    sudo ${ZMENU_PREFERRED_EDITOR} "$override_file"
+    local -a _ed=(); IFS=' ' read -r -a _ed <<< "$ZMENU_PREFERRED_EDITOR"
+    sudo "${_ed[@]}" "$override_file"
     echo -e "  ${DIM}  Remember to press R (Reload Ollama) to apply changes${NC}"
 }
 
@@ -1366,10 +1541,16 @@ _ai_ollama_env_set() {
     if [[ ! -f "$override_file" ]]; then
         printf '%s\n' '[Service]' | sudo tee "$override_file" >/dev/null 2>/dev/null
     fi
+    # Escape value for systemd unit syntax (quotes and backslashes)
+    local unit_val
+    unit_val=$(printf '%s' "$val" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    # Escape value for sed replacement delimiter
+    local sed_val
+    sed_val=$(printf '%s' "$unit_val" | sed 's/[&|]/\\&/g')
     if sudo grep -q "Environment=\"${key}=" "$override_file" 2>/dev/null; then
-        sudo sed -i "s|Environment=\"${key}=.*\"|Environment=\"${key}=${val}\"|" "$override_file" 2>/dev/null
+        sudo sed -i "s|Environment=\"${key}=.*\"|Environment=\"${key}=${sed_val}\"|" "$override_file" 2>/dev/null
     else
-        printf '%s\n' "Environment=\"${key}=${val}\"" | sudo tee -a "$override_file" >/dev/null 2>/dev/null
+        printf '%s\n' "Environment=\"${key}=${unit_val}\"" | sudo tee -a "$override_file" >/dev/null 2>/dev/null
     fi
     echo -e "  ${OK}  Set ${key}=${val}"
 }
@@ -1701,7 +1882,7 @@ _ai_reload_ollama() {
     fi
     sleep 2
     _disc_ollama
-    _sel_ai_model
+    _sel_ai_backend
     echo -e "  ${OK}  Active model: ${ZMENU_AI_MODEL:-none}"
 }
 
@@ -1758,7 +1939,7 @@ _ai_start_ollama() {
     fi
     sleep 2
     _disc_ollama
-    _sel_ai_model
+    _sel_ai_backend
     echo -e "  ${OK}  Model: ${ZMENU_AI_MODEL}"
 }
 
@@ -1812,27 +1993,6 @@ except: pass
     echo -e "  ${DIM}  VRAM freed within a few seconds${NC}"
 }
 
-_ai_test_inference() {
-    header
-    echo -e "${BCYN}┄ INFERENCE TEST${NC}"
-    if [[ -z "$ZMENU_AI_MODEL" || "$ZMENU_AI_MODEL" == "no-models-found" ]]; then
-        echo -e "  ${FAIL}  No model available"; return
-    fi
-    echo "  Sending test prompt to: ${ZMENU_AI_MODEL}"
-    echo ""
-    local response
-    local hsa_ver=""
-    [[ -n "$D_GPU_GFX" ]] && hsa_ver="${D_GPU_GFX#gfx}"
-    response=$(HSA_OVERRIDE_GFX_VERSION="${hsa_ver:-${HSA_OVERRIDE_GFX_VERSION:-}}" \
-        ollama run "$ZMENU_AI_MODEL" "Reply with exactly one word: ONLINE" 2>&1)
-    if echo "$response" | grep -qi "online"; then
-        echo -e "  ${OK}  Model responded: ${response}"
-        echo -e "  ${OK}  GPU inference confirmed"
-    else
-        echo -e "  ${WARN}  Response: ${response}"
-    fi
-}
-
 _ai_switch_model() {
     header
     echo -e "${BCYN}┄ SWITCH ACTIVE MODEL${NC}"
@@ -1857,11 +2017,7 @@ _ai_switch_model() {
     read -rp "  Select number: " n
     if [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -ge 1 ]] && [[ "$n" -le ${#D_OLLAMA_MODELS[@]} ]]; then
         ZMENU_AI_MODEL="${D_OLLAMA_MODELS[$((n-1))]}"
-        if grep -q "ZMENU_AI_MODEL" "$ZMENU_CONFIG_FILE"; then
-            sed -i "s|^ZMENU_AI_MODEL=.*|ZMENU_AI_MODEL=\"${ZMENU_AI_MODEL}\"|" "$ZMENU_CONFIG_FILE"
-        else
-            echo "ZMENU_AI_MODEL=\"${ZMENU_AI_MODEL}\"" >> "$ZMENU_CONFIG_FILE"
-        fi
+        _cfg_set "ZMENU_AI_MODEL" "$ZMENU_AI_MODEL"
         echo -e "  ${OK}  Active model: ${ZMENU_AI_MODEL}"
     fi
     pause
@@ -1903,11 +2059,7 @@ _ai_set_context_length() {
         *) echo -e "${RED}  Invalid.${NC}"; pause; return ;;
     esac
     ZMENU_AI_CONTEXT_LENGTH="$new_ctx"
-    if grep -q "ZMENU_AI_CONTEXT_LENGTH" "$ZMENU_CONFIG_FILE"; then
-        sed -i "s|^ZMENU_AI_CONTEXT_LENGTH=.*|ZMENU_AI_CONTEXT_LENGTH=${new_ctx}|" "$ZMENU_CONFIG_FILE"
-    else
-        echo "ZMENU_AI_CONTEXT_LENGTH=${new_ctx}" >> "$ZMENU_CONFIG_FILE"
-    fi
+    _cfg_set "ZMENU_AI_CONTEXT_LENGTH" "$new_ctx"
     echo -e "  ${OK}  Context window: ${new_ctx} tokens"
     pause
 }
@@ -1954,54 +2106,6 @@ _ai_sub_lms() {
     done
 }
 
-# ── Open WebUI sub-menu ────────────────────────────────────
-_ai_sub_owui() {
-    while true; do
-        header
-        echo -e "${BCYN}┄ OPEN WEBUI ───────────────────────────────────────────${NC}"
-        echo ""
-        if curl -sf "${OWUI_URL}" >/dev/null 2>&1; then
-            echo -e "  Status:  ${OK} running at ${OWUI_URL}"
-            docker inspect --format '  Container: {{.State.Status}}' open-webui 2>/dev/null || true
-        else
-            echo -e "  Status:  ${IDLE} not running"
-        fi
-        echo ""
-        if $D_OLLAMA_RUNNING; then
-            echo -e "  Ollama backend: ${OK} reachable"
-        else
-            echo -e "  Ollama backend: ${FAIL} not running"
-        fi
-        echo ""
-        echo "   1)  Open in browser"
-        echo "   2)  Restart container"
-        echo "   3)  Stop container"
-        echo "   4)  Start container"
-        echo "   5)  View logs (last 50)"
-        echo ""
-        echo "   r)  Back    q)  Quit zmenu"
-        echo ""
-        read -rp "  Selection: " ch
-        case $ch in
-            1) if command -v xdg-open >/dev/null 2>&1; then xdg-open "${OWUI_URL}" &>/dev/null &
-               else echo "  Open: ${OWUI_URL}"; fi
-               pause ;;
-            2) docker restart open-webui 2>/dev/null && echo -e "  ${OK}  Restarted" || echo -e "  ${FAIL}  Failed"; pause ;;
-            3) docker stop open-webui 2>/dev/null && echo -e "  ${OK}  Stopped" || echo -e "  ${FAIL}  Failed"; pause ;;
-            4) docker start open-webui 2>/dev/null && echo -e "  ${OK}  Started" || echo -e "  ${FAIL}  Failed"; pause ;;
-            5) header; echo -e "${BCYN}┄ OPEN WEBUI LOGS${NC}"; echo ""
-               docker logs --tail 50 open-webui 2>/dev/null | sed 's/^/  /' || echo "  No logs"
-               pause ;;
-            r|R) break ;;
-            q|Q) printf '
-%b  Sovereign. Signing off.%b
-
-' "${BGRN}" "${NC}"; exit 0 ;;
-            *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
-        esac
-    done
-}
-
 # ──────────────────────────────────────────────────────────
 #  MODULE 4: APPS & SERVICES (Docker)
 # ──────────────────────────────────────────────────────────
@@ -2021,7 +2125,7 @@ _SCAN_REGISTRY=(
     # ── AI Inference ────────────────────────────────────────
     "Ollama|ollama|ollama|ollama.service|11434|~/.ollama|ai-inference|HTTP-based LLM server (primary backend)"
     "LM Studio||lmstudio||1234|~/.lmstudio|ai-inference|GUI model downloader and inference server"
-    "LLM-Gateway|${LLM_GATEWAY_DIR:-/home/hox/projects/llm-gateway}/target/release/llm-gateway|llm-gateway||8090|${LLM_GATEWAY_DIR:-/home/hox/projects/llm-gateway}/config/slots.toml|ai-inference|Rust slot-based LLM gateway (Workhorse, Tiny, Vision, etc.)"
+    "LLM-Gateway|${LLM_GATEWAY_DIR:-${HOME}/projects/llm-gateway}/target/release/llm-gateway|llm-gateway||8090|${LLM_GATEWAY_DIR:-${HOME}/projects/llm-gateway}/config/slots.toml|ai-inference|Rust slot-based LLM gateway (Workhorse, Tiny, Vision, etc.)"
     "LiteLLM||litellm||4000||ai-inference|AI gateway / proxy (OpenAI-compatible)"
     "vLLM||vllm||8000||ai-inference|High-throughput LLM inference engine"
     "ComfyUI||comfyui||8188||ai-inference|Stable Diffusion UI and inference server"
@@ -2310,6 +2414,11 @@ _scan_unknowns() {
         "${HOME}/.local/"
         "${HOME}/.cargo/"
         "${HOME}/.nvm/"
+        "${HOME}/.rustup/"
+        "${HOME}/.pyenv/"
+        "${HOME}/.kimi-code/"
+        "${HOME}/.opencode/"
+        "${HOME}/.lmstudio/"
         "${HOME}/projects/"
         "/opt/"
     )
@@ -2323,7 +2432,10 @@ _scan_unknowns() {
         read -r proc_user pid pcpu pmem rss comm _ <<< "$line"
         [[ -z "$pid" ]] && continue
         local rss_mb=$(( rss / 1024 ))
-        local comm_base; comm_base=$(basename "$comm")
+        local exe_path
+        exe_path=$(_proc_exe_path "$pid")
+        [[ -z "$exe_path" ]] && continue
+        local comm_base; comm_base=$(basename "$exe_path")
 
         # Check if basename matches a known process
         local known=false
@@ -2336,28 +2448,33 @@ _scan_unknowns() {
         local tier="warn"
         local indicator="$WARN"
 
-        # FLAG: running from suspicious locations
-        # Exception: /tmp/.mount_*/  = AppImage self-mount (normal, safe)
-        if [[ "$comm" == /tmp/.mount_* ]]; then
-            tier="safe"; indicator="$IDLE"
-        elif [[ "$comm" == /tmp/* || "$comm" == /dev/shm/* || "$comm" == /run/user/*/tmp* || "$comm" == */\.* ]]; then
-            tier="flag"; indicator="$FAIL"
-
-        # FLAG: root-owned process from non-system path
-        elif [[ "$proc_user" == "root" ]]; then
-            local in_sys=false
-            for tp in "/usr/bin/" "/usr/sbin/" "/usr/lib/" "/usr/libexec/" "/lib/" "/sbin/" "/bin/" "/opt/"; do
-                [[ "$comm" == ${tp}* ]] && { in_sys=true; break; }
-            done
-            $in_sys && { indicator="$WARN"; tier="warn"; } || { indicator="$FAIL"; tier="flag"; }
-
         # SAFE: current user + trusted path
-        elif [[ "$proc_user" == "$_me" ]]; then
+        if [[ "$proc_user" == "$_me" ]]; then
             local in_trusted=false
             for tp in "${trusted_paths[@]}"; do
-                [[ "$comm" == ${tp}* ]] && { in_trusted=true; break; }
+                [[ "$exe_path" == ${tp}* ]] && { in_trusted=true; break; }
             done
-            $in_trusted && { indicator="$IDLE"; tier="safe"; }
+            if $in_trusted; then
+                tier="safe"; indicator="$IDLE"
+            fi
+        fi
+
+        # SUSPICIOUS locations (only evaluated if not already safe)
+        # Exception: /tmp/.mount_*/  = AppImage self-mount (normal, safe)
+        if [[ "$tier" != "safe" ]]; then
+            if [[ "$exe_path" == /tmp/.mount_* ]]; then
+                tier="safe"; indicator="$IDLE"
+            elif [[ "$exe_path" == /tmp/* || "$exe_path" == /dev/shm/* || "$exe_path" == /run/user/*/tmp* || "$exe_path" == /run/shm/* || "$exe_path" == /var/tmp/* ]]; then
+                tier="flag"; indicator="$FAIL"
+
+            # FLAG: root-owned process from non-system path
+            elif [[ "$proc_user" == "root" ]]; then
+                local in_sys=false
+                for tp in "/usr/bin/" "/usr/sbin/" "/usr/lib/" "/usr/libexec/" "/lib/" "/lib64/" "/sbin/" "/bin/" "/opt/"; do
+                    [[ "$exe_path" == ${tp}* ]] && { in_sys=true; break; }
+                done
+                $in_sys && { indicator="$WARN"; tier="warn"; } || { indicator="$FAIL"; tier="flag"; }
+            fi
         fi
 
         local tier_color tier_word
@@ -2807,12 +2924,14 @@ _show_process_groups() {
                         ;;
                     Hermes)
                         pkill -f "Hermes" 2>/dev/null || true
-                        pkill -x "hermes_cli" 2>/dev/null || true
-                        pkill -f "python.*hermes.*gateway" 2>/dev/null || true
+                        pkill -x "hermes" 2>/dev/null || true
+                        pkill -f "hermes gateway" 2>/dev/null || true
                         ;;
                     Docker)
                         if [[ "$D_DOCKER_RUNNING" == true ]]; then
-                            docker stop $(docker ps -q) 2>/dev/null || true
+                            local _containers=()
+                            mapfile -t _containers < <(docker ps -q 2>/dev/null || true)
+                            [[ ${#_containers[@]} -gt 0 ]] && docker stop "${_containers[@]}" 2>/dev/null || true
                         fi
                         ;;
                     Zed)
@@ -3261,6 +3380,7 @@ mod_security() {
             E) export_report "Security & Privacy"; pause ;;
             C) _cc_inline "Security & Privacy" _ctx_security _apply_security; pause ;;
             r|R) break ;;
+            q|Q) printf '\n%b  Sovereign. Signing off.%b\n\n' "${BGRN}" "${NC}"; exit 0 ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
         esac
     done
@@ -3453,8 +3573,8 @@ _priv_telemetry_status() {
         # snap metrics — capture stderr to distinguish "no attribute" from real values
         local _snap_out _snap_err _snap_ok=false
         if command -v snap >/dev/null 2>&1; then
-            _snap_out=$(snap get system metrics.enable 2>/tmp/zmenu-snap-err || true)
-            _snap_err=$(cat /tmp/zmenu-snap-err 2>/dev/null || true)
+            _snap_out=$(snap get system metrics.enable 2>"${ZMENU_TMP_DIR}/zmenu-snap-err" || true)
+            _snap_err=$(cat "${ZMENU_TMP_DIR}/zmenu-snap-err" 2>/dev/null || true)
             if [[ "$_snap_out" == "false" ]]; then
                 printf "    %b  %-20s %b%s%b\n" "$OK" "snap" "$DIM" "metrics.enable=false" "$NC"
             elif echo "$_snap_err" | grep -q "no.*attribute\|not found\|has no"; then
@@ -3830,6 +3950,7 @@ mod_maintenance() {
             E) export_report "Maintenance"; pause ;;
             C) _cc_inline "Maintenance" _ctx_maintenance _apply_maintenance; pause ;;
             r|R) break ;;
+            q|Q) printf '\n%b  Sovereign. Signing off.%b\n\n' "${BGRN}" "${NC}"; exit 0 ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
         esac
     done
@@ -4018,8 +4139,8 @@ _proj_open() {
             a) if command -v gnome-terminal >/dev/null 2>&1; then gnome-terminal --working-directory="$path" &>/dev/null &
                else echo "  cd ${path}"; fi ;;
             b) cc_launch "Project: ${name}" "Working on project at ${path}. Read AI.md if present." "$path" "--tui"; pause ;;
-            c) ${ZMENU_PREFERRED_EDITOR} "${path}/AI.md" ;;
-            d) mkdir -p "${path}/.config/ai"; ${ZMENU_PREFERRED_EDITOR} "${path}/.config/ai/settings.json" ;;
+            c) _run_editor "${path}/AI.md" ;;
+            d) mkdir -p "${path}/.config/ai"; _run_editor "${path}/.config/ai/settings.json" ;;
             E) export_report "Project: ${name}"; pause ;;
             r|R) break ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 1 ;;
@@ -4113,11 +4234,7 @@ _ai_backend_picker() {
 
 _ai_backend_set() {
     local backend="$1"
-    if grep -q '^ZMENU_AI_BACKEND=' "$ZMENU_CONFIG_FILE" 2>/dev/null; then
-        sed -i "s|^ZMENU_AI_BACKEND=.*|ZMENU_AI_BACKEND=\"${backend}\"|" "$ZMENU_CONFIG_FILE"
-    else
-        printf '\nZMENU_AI_BACKEND="%s"\n' "$backend" >> "$ZMENU_CONFIG_FILE"
-    fi
+    _cfg_set "ZMENU_AI_BACKEND" "$backend"
     ZMENU_AI_BACKEND="$backend"
     _sel_ai_backend
     echo -e "  ${OK}  Backend preference: ${backend}  →  active: ${AI_BACKEND_LABEL}"
@@ -4183,7 +4300,17 @@ mod_settings() {
         read -rp "  Selection: " ch
         case $ch in
             a) _mgmt_reinstall; pause ;;
-            b) set +e; ${ZMENU_PREFERRED_EDITOR} "$ZMENU_SELF"; set -e ;;
+            b)
+                local src_dir
+                src_dir="$(dirname "$ZMENU_SELF")/src"
+                if [[ -d "$src_dir" ]]; then
+                    set +e; _run_editor "$src_dir"; set -e
+                else
+                    echo -e "  ${WARN}  Source directory not found at ${src_dir}"
+                    echo -e "  ${DIM}  Run from the project directory to edit sources.${NC}"
+                    sleep 1
+                fi
+                ;;
             c) cfg_edit ;;
             d) _mgmt_envcheck; pause ;;
             e) echo "  Re-running discovery..."; discover; echo -e "  ${OK}  Done"; pause ;;
@@ -4281,7 +4408,7 @@ _cc_global_settings() {
         echo ""
         read -rp "  Selection: " ch
         case $ch in
-            e|E) mkdir -p "${HOME}/.config/ai"; ${ZMENU_PREFERRED_EDITOR} "$f" ;;
+            e|E) mkdir -p "${HOME}/.config/ai"; _run_editor "$f" ;;
             r|R|b|B) break ;;
             q|Q) exit 0 ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 0.5 ;;
@@ -4308,7 +4435,7 @@ _cc_global_md() {
         echo ""
         read -rp "  Selection: " ch
         case $ch in
-            e|E) mkdir -p "${HOME}/.config/ai"; ${ZMENU_PREFERRED_EDITOR} "$f" ;;
+            e|E) mkdir -p "${HOME}/.config/ai"; _run_editor "$f" ;;
             r|R|b|B) break ;;
             q|Q) exit 0 ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 0.5 ;;
@@ -4352,7 +4479,7 @@ _cc_skills() {
                     echo "   e)  Edit    d)  Delete    r)  Back"
                     read -rp "  Selection: " act
                     case $act in
-                        e|E) ${ZMENU_PREFERRED_EDITOR} "$sf" ;;
+                        e|E) _run_editor "$sf" ;;
                         d|D) confirm "Delete?" && rm "$sf" && echo -e "  ${OK}  Deleted"; pause ;;
                     esac
                 fi ;;
@@ -4371,7 +4498,7 @@ _cc_skill_new() {
     if [[ ! -f "$f" ]]; then
         printf "# %s\n\n## Purpose\nDescribe what this skill teaches your AI.\n\n## Rules\n- Rule 1\n\n## Examples\n" "$name" > "$f"
     fi
-    ${ZMENU_PREFERRED_EDITOR} "$f"
+    _run_editor "$f"
 }
 
 _cc_mcps() {
@@ -4415,7 +4542,7 @@ PYEOF
         read -rp "  Selection: " ch
         case $ch in
             a|A) _cc_mcp_add ;;
-            e|E) ${ZMENU_PREFERRED_EDITOR} "$settings" ;;
+            e|E) _run_editor "$settings" ;;
             r|R) break ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 0.5 ;;
         esac
@@ -4513,8 +4640,8 @@ _cc_proj_detail() {
         echo ""
         read -rp "  Selection: " ch
         case $ch in
-            e|E) ${ZMENU_PREFERRED_EDITOR} "${path}/AI.md" ;;
-            s|S) mkdir -p "${path}/.config/ai"; ${ZMENU_PREFERRED_EDITOR} "${path}/.config/ai/settings.json" ;;
+            e|E) _run_editor "${path}/AI.md" ;;
+            s|S) mkdir -p "${path}/.config/ai"; _run_editor "${path}/.config/ai/settings.json" ;;
             r|R|b|B) break ;;
             q|Q) exit 0 ;;
             *) echo -e "${RED}  Invalid.${NC}"; sleep 0.5 ;;
@@ -4545,7 +4672,7 @@ _search_universal() {
     # Processes
     echo -e "  ${BOLD}Processes:${NC}"
     local _procs
-    _procs=$(ps aux 2>/dev/null | grep -i "$query" | grep -v grep | head -5 | \
+    _procs=$(ps aux 2>/dev/null | grep -Fi -- "$query" | grep -v grep | head -5 | \
         awk '{printf "    %-12s %5.1f%% %6.0f MB  %s\n", $2, $3, $6/1024, $11}' 2>/dev/null || true)
     if [[ -n "$_procs" ]]; then
         echo "$_procs"; _found=true
@@ -4557,7 +4684,7 @@ _search_universal() {
     # Services
     echo -e "  ${BOLD}Services:${NC}"
     local _svcs
-    _svcs=$(printf '%s\n' "${D_SERVICES[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' 2>/dev/null || true)
+    _svcs=$(printf '%s\n' "${D_SERVICES[@]}" 2>/dev/null | grep -Fi -- "$query" | sed 's/^/    /' 2>/dev/null || true)
     if [[ -n "$_svcs" ]]; then
         echo "$_svcs"; _found=true
     else
@@ -4568,7 +4695,7 @@ _search_universal() {
     # Ports
     echo -e "  ${BOLD}Ports:${NC}"
     local _ports
-    _ports=$(printf '%s\n' "${D_OPEN_PORTS[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' 2>/dev/null || true)
+    _ports=$(printf '%s\n' "${D_OPEN_PORTS[@]}" 2>/dev/null | grep -Fi -- "$query" | sed 's/^/    /' 2>/dev/null || true)
     if [[ -n "$_ports" ]]; then
         echo "$_ports"; _found=true
     else
@@ -4579,7 +4706,7 @@ _search_universal() {
     # Wiki
     echo -e "  ${BOLD}Wiki:${NC}"
     local _wiki
-    _wiki=$(grep -ri "$query" "$ZMENU_WIKI_DIR"/*.md 2>/dev/null | head -5 | sed 's/^/    /' 2>/dev/null || true)
+    _wiki=$(grep -Fri -- "$query" "$ZMENU_WIKI_DIR"/*.md 2>/dev/null | head -5 | sed 's/^/    /' 2>/dev/null || true)
     if [[ -n "$_wiki" ]]; then
         echo "$_wiki"; _found=true
     else
@@ -4628,8 +4755,8 @@ _menu_help_main() {
     echo "  3) Docker         — Start/stop Docker, view containers,"
     echo "                      prune images, view logs."
     echo ""
-    echo "  4) System Scan    — Security audit: firewall, ports, VPN,"
-    echo "                      unknown services, telemetry opt-outs."
+    echo "  4) System Scan    — App registry inventory, listening ports,"
+    echo "                      process groups, unknown/suspicious processes."
     echo ""
     echo "  5) Hardware       — GPU, NPU, CPU, thermals, power profiles,"
     echo "                      PCIe info, disk health."
@@ -4641,6 +4768,12 @@ _menu_help_main() {
     echo "                      scaffold AI.md, launch coding sessions."
     echo ""
     echo "  8) Settings       — Edit config, check versions, reinstall."
+    echo ""
+    echo "  9) Security & Priv— Ports, firewall, failed logins, rootkit,"
+    echo "                      telemetry opt-outs, browser privacy."
+    echo ""
+    echo "  0) Maintenance    — APT updates, disk audit, SMART health,"
+    echo "                      journal errors and trimming."
     echo ""
     echo "  r) Refresh        — Re-run discovery to update live metrics"
     echo "  /) Search         — Fuzzy search processes, services, wiki"

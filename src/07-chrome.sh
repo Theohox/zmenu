@@ -3,7 +3,10 @@
 # ============================================================
 
 header() {
-    clear
+    # Skip TTY-only operations in headless / non-TTY mode so --run does not crash
+    if [[ -t 1 && "${ZMENU_HEADLESS:-0}" != "1" ]]; then
+        clear
+    fi
     printf '\033[1;34m'
     echo "  ┌─────────────────────────────────────────────────────────┐"
     printf "  │  ▲  Z-MENU  v%-6s  ·  LOCAL SOVEREIGN                │\n" "$ZMENU_VERSION"
@@ -20,12 +23,6 @@ confirm() {
     local prompt="$1"
     read -rp "  ${prompt} (y/N): " _c
     [[ "$_c" =~ ^[Yy]$ ]]
-}
-
-submenu_footer() {
-    echo ""
-    echo -e "  ${DIM}─────────────────────────────────────────${NC}"
-    echo -e "  ${DIM}[Enter]=back    [r]=refresh    [q]=quit zmenu${NC}"
 }
 
 # ── Session logging ────────────────────────────────────────
@@ -367,7 +364,7 @@ dashboard() {
     # AI Engine — last, collapsible (only if any backend is running)
     local _ai_any=false
     if [[ "$D_OLLAMA_RUNNING" == true || \
-          "$D_LMS_RUNNING" == true || "$D_CLAUDE_SESSION" == true || \
+          "$D_LMS_RUNNING" == true || \
           "$D_GATEWAY_RUNNING" == true || \
           "$D_LITELLM_RUNNING" == true || \
           "$D_VLLM_RUNNING" == true || \
@@ -379,9 +376,6 @@ dashboard() {
        pgrep -x "$OPENCODE_PROCESS" >/dev/null 2>&1; then
         echo -e "  ${BOLD}AI Engine${NC}"
         _ai_any=true
-    fi
-    if [[ "$D_CLAUDE_SESSION" == true ]]; then
-        echo -e "    Claude Code ${OK}  session active  v${D_CLAUDE_VER}"
     fi
     if pgrep -x "$OPENCODE_PROCESS" >/dev/null 2>&1; then
         echo -e "    OpenCode    ${OK}  RUNNING  v$( "$(_opencode_cmd)" --version 2>/dev/null || echo '?' )"

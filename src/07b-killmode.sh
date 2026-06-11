@@ -5,35 +5,33 @@
 # ============================================================
 
 _kill_process_menu() {
-    local pid="$1" pname="$2" pcpu="${3:-}" pmem="${4:-}"
+    local pid="$1" pname="$2" pcpu="${3:-}" pmem="${4:-}" default_act="${5:-}"
     echo ""
     echo "  Selected: ${BOLD}${pname}${NC} (pid ${pid})"
     [[ -n "$pcpu" && "$pcpu" != "?" ]] && echo "  CPU: ${pcpu}%"
     [[ -n "$pmem" && "$pmem" != "?" ]] && echo "  RAM: ${pmem}%"
-    echo ""
-    echo "   k)  SIGTERM  — graceful kill (let it clean up)"
-    echo "   K)  SIGKILL  — force kill   (cannot be blocked)"
-    echo "   i)  Info     — files, cwd, command line"
-    echo "   c)  Cancel"
-    echo ""
-    read -rp "  Action: " act
+
+    local act="$default_act"
+    if [[ -z "$act" ]]; then
+        echo ""
+        echo "   k)  SIGTERM  — graceful kill (let it clean up)"
+        echo "   K)  SIGKILL  — force kill   (cannot be blocked)"
+        echo "   i)  Info     — files, cwd, command line"
+        echo "   c)  Cancel"
+        echo ""
+        read -rp "  Action: " act
+    fi
+
     case "$act" in
-        k)
-            if kill -TERM "$pid" 2>/dev/null; then
-                echo -e "  ${OK}  Sent SIGTERM to ${pname} (pid ${pid})"
-                _session_log "kill" "SIGTERM ${pname} (pid ${pid})" "OK"
-            else
-                echo -e "  ${FAIL}  Failed — try SIGKILL or run with sudo"
-                _session_log "kill" "SIGTERM ${pname} (pid ${pid})" "FAIL"
-            fi
-            ;;
-        K)
-            if kill -KILL "$pid" 2>/dev/null; then
-                echo -e "  ${OK}  Sent SIGKILL to ${pname} (pid ${pid})"
-                _session_log "kill" "SIGKILL ${pname} (pid ${pid})" "OK"
+        k|K)
+            local sig="TERM"
+            [[ "$act" == "K" ]] && sig="KILL"
+            if kill -"$sig" "$pid" 2>/dev/null; then
+                echo -e "  ${OK}  Sent SIG${sig} to ${pname} (pid ${pid})"
+                _session_log "kill" "SIG${sig} ${pname} (pid ${pid})" "OK"
             else
                 echo -e "  ${FAIL}  Failed — check permissions (maybe root-owned?)"
-                _session_log "kill" "SIGKILL ${pname} (pid ${pid})" "FAIL"
+                _session_log "kill" "SIG${sig} ${pname} (pid ${pid})" "FAIL"
             fi
             ;;
         i|I)
@@ -46,6 +44,12 @@ _kill_process_menu() {
             echo "  Open files: ${nfiles}"
             echo ""
             read -rp "  $(printf '%b' "${DIM}[Enter] back${NC}") " _
+            ;;
+        c|C|'')
+            return ;;
+        *)
+            echo -e "  ${RED}Invalid action${NC}"
+            sleep 0.3
             ;;
     esac
 }
@@ -98,7 +102,7 @@ _kill_top_cpu() {
             local pid pcpu comm user
             IFS='|' read -r pid pcpu comm user <<< "${lines[$((n-1))]}"
             local pname; pname=$(basename "$comm")
-            _kill_process_menu "$pid" "$pname" "$pcpu"
+            _kill_process_menu "$pid" "$pname" "$pcpu" "" "$act"
         fi
     done
 }
@@ -152,7 +156,7 @@ _kill_top_mem() {
             local pid pmem rss comm user
             IFS='|' read -r pid pmem rss comm user <<< "${lines[$((n-1))]}"
             local pname; pname=$(basename "$comm")
-            _kill_process_menu "$pid" "$pname" "" "$pmem"
+            _kill_process_menu "$pid" "$pname" "" "$pmem" "$act"
         fi
     done
 }
@@ -211,12 +215,14 @@ _kill_groups() {
                         ;;
                     Hermes)
                         pkill -f "Hermes" 2>/dev/null || true
-                        pkill -x "hermes_cli" 2>/dev/null || true
-                        pkill -f "python.*hermes.*gateway" 2>/dev/null || true
+                        pkill -x "hermes" 2>/dev/null || true
+                        pkill -f "hermes gateway" 2>/dev/null || true
                         ;;
                     Docker)
                         if [[ "$D_DOCKER_RUNNING" == true ]]; then
-                            docker stop $(docker ps -q) 2>/dev/null || true
+                            local _containers=()
+                            mapfile -t _containers < <(docker ps -q 2>/dev/null || true)
+                            [[ ${#_containers[@]} -gt 0 ]] && docker stop "${_containers[@]}" 2>/dev/null || true
                         fi
                         ;;
                     Zed)
@@ -293,6 +299,8 @@ _kill_unknowns() {
             "/usr/bin/" "/usr/lib/" "/usr/libexec/" "/usr/share/"
             "/usr/sbin/" "/lib/" "/lib64/" "/snap/"
             "${HOME}/.local/" "${HOME}/.cargo/" "${HOME}/.nvm/"
+            "${HOME}/.rustup/" "${HOME}/.pyenv/"
+            "${HOME}/.kimi-code/" "${HOME}/.opencode/" "${HOME}/.lmstudio/"
             "${HOME}/projects/" "/opt/"
         )
 
@@ -303,7 +311,10 @@ _kill_unknowns() {
             read -r proc_user pid pcpu pmem rss comm _ <<< "$line"
             [[ -z "$pid" ]] && continue
             local rss_mb=$((rss / 1024))
-            local comm_base; comm_base=$(basename "$comm")
+            local exe_path
+            exe_path=$(_proc_exe_path "$pid")
+            [[ -z "$exe_path" ]] && continue
+            local comm_base; comm_base=$(basename "$exe_path")
 
             local known=false
             for kp in "${known_procs[@]}"; do
@@ -313,22 +324,31 @@ _kill_unknowns() {
 
             local tier="warn"
             local indicator="$WARN"
-            if [[ "$comm" == /tmp/.mount_* ]]; then
-                tier="safe"; indicator="$IDLE"
-            elif [[ "$comm" == /tmp/* || "$comm" == /dev/shm/* || "$comm" == /run/user/*/tmp* || "$comm" == */.* ]]; then
-                tier="flag"; indicator="$FAIL"
-            elif [[ "$proc_user" == "root" ]]; then
-                local in_sys=false
-                for tp in "/usr/bin/" "/usr/sbin/" "/usr/lib/" "/usr/libexec/" "/lib/" "/sbin/" "/bin/" "/opt/"; do
-                    [[ "$comm" == ${tp}* ]] && { in_sys=true; break; }
-                done
-                $in_sys && { indicator="$WARN"; tier="warn"; } || { indicator="$FAIL"; tier="flag"; }
-            elif [[ "$proc_user" == "$_me" ]]; then
+
+            # SAFE: current user + trusted path
+            if [[ "$proc_user" == "$_me" ]]; then
                 local in_trusted=false
                 for tp in "${trusted_paths[@]}"; do
-                    [[ "$comm" == ${tp}* ]] && { in_trusted=true; break; }
+                    [[ "$exe_path" == ${tp}* ]] && { in_trusted=true; break; }
                 done
-                $in_trusted && { indicator="$IDLE"; tier="safe"; }
+                if $in_trusted; then
+                    tier="safe"; indicator="$IDLE"
+                fi
+            fi
+
+            # SUSPICIOUS locations (only evaluated if not already safe)
+            if [[ "$tier" != "safe" ]]; then
+                if [[ "$exe_path" == /tmp/.mount_* ]]; then
+                    tier="safe"; indicator="$IDLE"
+                elif [[ "$exe_path" == /tmp/* || "$exe_path" == /dev/shm/* || "$exe_path" == /run/user/*/tmp* || "$exe_path" == /run/shm/* || "$exe_path" == /var/tmp/* ]]; then
+                    tier="flag"; indicator="$FAIL"
+                elif [[ "$proc_user" == "root" ]]; then
+                    local in_sys=false
+                    for tp in "/usr/bin/" "/usr/sbin/" "/usr/lib/" "/usr/libexec/" "/lib/" "/lib64/" "/sbin/" "/bin/" "/opt/"; do
+                        [[ "$exe_path" == ${tp}* ]] && { in_sys=true; break; }
+                    done
+                    $in_sys && { indicator="$WARN"; tier="warn"; } || { indicator="$FAIL"; tier="flag"; }
+                fi
             fi
 
             [[ "$tier" == "safe" ]] && continue

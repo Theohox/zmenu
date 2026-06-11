@@ -106,17 +106,16 @@ _apply_safe_exec() {
     "${args[@]}" 2>>"$ZMENU_ERROR_LOG"
 }
 
-# Extract and run AI-suggested commands safely.
-# Priority: fenced code blocks (```...```) → bare allowlisted lines.
-# Usage: _apply_generic "$ai_text" "Section Name"
-_apply_generic() {
+# Extract runnable commands from AI response text.
+# Priority: shell-fenced code blocks (```bash/sh/shell/zsh) → bare allowlisted lines.
+# This is the single source of truth for both preview and execution.
+_apply_extract_commands() {
     local ai_text="$1"
-    local section="${2:-General}"
     local cmds=""
 
-    # Primary: extract all lines inside ``` fenced blocks
+    # Primary: extract lines inside shell-style fenced blocks
     cmds=$(printf '%s\n' "$ai_text" \
-        | awk '/^```/{p=!p; next} p && /[^[:space:]]/{print}' \
+        | awk '/^```(bash|sh|shell|zsh)$/{p=1; next} /^```$/{p=0; next} p && /[^[:space:]]/{print}' \
         | grep -vE '^[[:space:]]*#' \
         | sed 's/^[[:space:]]*//')
 
@@ -131,10 +130,22 @@ _apply_generic() {
             | sed 's/^[[:space:]]*//')
     fi
 
+    printf '%s\n' "$cmds"
+}
+
+# Extract and run AI-suggested commands safely.
+# Usage: _apply_generic "$ai_text" "Section Name"
+_apply_generic() {
+    local ai_text="$1"
+    local section="${2:-General}"
+    local cmds=""
+
+    cmds=$(_apply_extract_commands "$ai_text")
+
     if [[ -z "$cmds" ]]; then
         echo -e "  ${WARN}  No runnable commands found — copy from the response above."
-        printf '%s\n' "$ai_text" > /tmp/zmenu-ai-apply.txt
-        echo -e "  ${DIM}  Saved → /tmp/zmenu-ai-apply.txt${NC}"
+        printf '%s\n' "$ai_text" > "${ZMENU_TMP_DIR}/zmenu-ai-apply.txt"
+        echo -e "  ${DIM}  Saved → ${ZMENU_TMP_DIR}/zmenu-ai-apply.txt${NC}"
         return 1
     fi
 
@@ -296,6 +307,70 @@ _ctx_ai_engine() {
                 "${D_GATEWAY_SLOTS_INFLIGHT[$i]}"
         done
     fi
+
+    printf "\nLemonade:        %s\n" "$(${D_LEMONADE_RUNNING} && echo "RUNNING at port ${D_LEMONADE_PORT:-?} (pid ${D_LEMONADE_PID:-?})" || echo 'stopped')"
+    if [[ "$D_LEMONADE_RUNNING" == true && ${#D_LEMONADE_BACKENDS[@]} -gt 0 ]]; then
+        printf "Backends:\n"
+        local be
+        for be in "${D_LEMONADE_BACKENDS[@]}"; do
+            local bname _bport _bpid _bram
+            IFS='|' read -r bname _ _bport _bpid _bram <<< "$be"
+            printf "  %-14s pid:%-7s port:%-5s %s MB\n" "$bname" "$_bpid" "${_bport:-—}" "$_bram"
+        done
+    fi
+
+    printf "\nHermes:          %s\n" "$(${D_HERMES_RUNNING} && echo "RUNNING" || echo 'stopped')"
+    if [[ "$D_HERMES_RUNNING" == true ]]; then
+        [[ -n "$D_HERMES_DESKTOP_PID" ]] && printf "  Desktop  pid %s\n" "$D_HERMES_DESKTOP_PID"
+        [[ -n "$D_HERMES_CLI_PID" ]]     && printf "  CLI/TUI  pid %s\n" "$D_HERMES_CLI_PID"
+        [[ -n "$D_HERMES_GATEWAY_PID" ]] && printf "  Gateway  pid %s\n" "$D_HERMES_GATEWAY_PID"
+    fi
+}
+
+# ── Lemonade context ──────────────────────────────────────
+_ctx_lemonade() {
+    printf "Section focus: Lemonade AI lab orchestrator\n\n"
+    printf "Binary:          %s\n" "${ZMENU_LEMONADE_BIN:-lemond}"
+    printf "Status:          %s\n" "$(${D_LEMONADE_RUNNING} && echo "RUNNING" || echo "stopped")"
+    if ${D_LEMONADE_RUNNING}; then
+        printf "PID:             %s\n" "${D_LEMONADE_PID:-?}"
+        printf "Port:            %s\n" "${D_LEMONADE_PORT:-?}"
+        printf "Config:          %s\n" "${HOME}/.cache/lemonade/config.json"
+        printf "\nBackends:\n"
+        local be
+        for be in "${D_LEMONADE_BACKENDS[@]}"; do
+            local bname btype bport bpid bram
+            IFS='|' read -r bname btype bport bpid bram <<< "$be"
+            printf "  %-14s pid:%-7s port:%-5s %s MB\n" "$bname" "$bpid" "${bport:-—}" "$bram"
+        done
+        printf "\nModels (downloaded):\n"
+        "${ZMENU_LEMONADE_BIN:-lemond}" --help >/dev/null 2>&1 || true
+        local _lemonade_cli
+        _lemonade_cli=$(command -v lemonade 2>/dev/null || echo "")
+        if [[ -n "$_lemonade_cli" ]]; then
+            "$_lemonade_cli" list --downloaded 2>/dev/null | sed 's/^/  /' || printf "  (unable to list)\n"
+        else
+            printf "  lemonade CLI not found on PATH\n"
+        fi
+    fi
+}
+
+# ── Hermes context ────────────────────────────────────────
+_ctx_hermes() {
+    printf "Section focus: Hermes AI agent\n\n"
+    printf "Binary:          %s\n" "${ZMENU_HERMES_BIN:-hermes}"
+    printf "Status:          %s\n" "$(${D_HERMES_RUNNING} && echo "RUNNING" || echo "stopped")"
+    if ${D_HERMES_RUNNING}; then
+        [[ -n "$D_HERMES_DESKTOP_PID" ]] && printf "Desktop:         running pid %s\n" "$D_HERMES_DESKTOP_PID"
+        [[ -n "$D_HERMES_CLI_PID" ]]     && printf "CLI/TUI:         running pid %s\n" "$D_HERMES_CLI_PID"
+        [[ -n "$D_HERMES_GATEWAY_PID" ]] && printf "Gateway:         running pid %s\n" "$D_HERMES_GATEWAY_PID"
+    fi
+    printf "\nCommon commands:\n"
+    printf "  hermes                 # interactive CLI/TUI\n"
+    printf "  hermes gateway run     # foreground gateway\n"
+    printf "  hermes gateway start   # background service (systemd/launchd)\n"
+    printf "  hermes model           # choose provider/model\n"
+    printf "  hermes doctor          # diagnose issues\n"
 }
 
 # ── OpenCode context ──────────────────────────────────────
@@ -520,4 +595,7 @@ _ctx_maintenance() {
     printf "\nSwap:\n"
     printf "  Used: %s / %s MB\n" "$D_SWAP_USED_MB" "$D_SWAP_TOTAL_MB"
 }
+
+_apply_lemonade() { _apply_generic "$1" "Lemonade"; }
+_apply_hermes()   { _apply_generic "$1" "Hermes"; }
 

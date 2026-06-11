@@ -65,7 +65,6 @@ _disc_external_tools() {
     D_RADEONTOP_AVAILABLE=false
     D_RADEONTOP_BIN=""
     D_SENSORS_AVAILABLE=false
-    D_SENSORS_FULL=()
 
     if command -v radeontop >/dev/null 2>&1; then
         D_RADEONTOP_AVAILABLE=true
@@ -74,9 +73,6 @@ _disc_external_tools() {
 
     if command -v sensors >/dev/null 2>&1; then
         D_SENSORS_AVAILABLE=true
-        while IFS= read -r line; do
-            [[ -n "$line" ]] && D_SENSORS_FULL+=("$line")
-        done < <(sensors 2>/dev/null || true)
     fi
 }
 
@@ -180,49 +176,4 @@ _tool_launcher() {
     esac
 }
 
-# ── Tmux session manager (placeholder) ─────────────────────
-_disc_tmux() {
-    D_TMUX_AVAILABLE=false
-    D_TMUX_SESSIONS=()
-    command -v tmux >/dev/null 2>&1 || return
-    D_TMUX_AVAILABLE=true
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && D_TMUX_SESSIONS+=("$line")
-    done < <(tmux list-sessions -F "#{session_name}|#{session_windows}|#{session_attached}" 2>/dev/null || true)
-}
 
-_mod_tmux() {
-    _disc_tmux || true
-    while true; do
-        header
-        echo -e "${BCYN}┄ TMUX SESSIONS ────────────────────────────────────────${NC}"
-        echo ""
-        if [[ "$D_TMUX_AVAILABLE" == false ]]; then
-            echo -e "  ${IDLE}  tmux not installed${NC}"
-            echo "    Install: sudo apt install tmux"
-        elif [[ ${#D_TMUX_SESSIONS[@]} -eq 0 ]]; then
-            echo -e "  ${IDLE}  No active tmux sessions${NC}"
-        else
-            for s in "${D_TMUX_SESSIONS[@]}"; do
-                local sname swins satt
-                IFS='|' read -r sname swins satt <<< "$s"
-                local sym="$OK"
-                [[ "$satt" == "0" ]] && sym="$WARN"
-                printf "  %b  %-20s %s windows  %s\n" "$sym" "$sname" "$swins" "$( [[ "$satt" == "1" ]] && echo "attached" || echo "detached" )"
-            done
-        fi
-        echo ""
-        echo "   a)  Attach to session"
-        echo "   n)  New session"
-        echo "   k)  Kill session"
-        echo "   q)  Back"
-        echo ""
-        read -rp "  Selection: " ch
-        case "$ch" in
-            a) [[ ${#D_TMUX_SESSIONS[@]} -gt 0 ]] && tmux attach-session -t "${D_TMUX_SESSIONS[0]%%|*}" ;;
-            n) tmux new-session -d -s "zmenu-$(date +%s)"; _disc_tmux; pause ;;
-            k) [[ ${#D_TMUX_SESSIONS[@]} -gt 0 ]] && tmux kill-session -t "${D_TMUX_SESSIONS[0]%%|*}"; _disc_tmux; pause ;;
-            q|Q) break ;;
-        esac
-    done
-}

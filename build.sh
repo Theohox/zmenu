@@ -13,13 +13,12 @@ OUT_FILE="${SCRIPT_DIR}/zmenu.sh"
 # ── Header ─────────────────────────────────────────────────
 echo "Building zmenu..."
 
-# Create output with shebang and build timestamp
+# Create output with shebang and version marker
 {
     echo '#!/usr/bin/env bash'
     echo "# ============================================================"
-    echo "#  Z-MENU  —  Built $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "#  Auto-generated from src/*.sh — edit sources, not this file"
-    echo "#  Build: ./build.sh"
+    echo "#  Z-MENU  —  Auto-generated from src/*.sh"
+    echo "#  Edit sources, not this file. Build: ./build.sh"
     echo "# ============================================================"
     echo ""
 } > "$OUT_FILE"
@@ -43,6 +42,17 @@ done
 if ! bash -n "$OUT_FILE"; then
     echo "  ✗ Syntax errors detected!"
     exit 1
+fi
+
+# ── Static analysis (shellcheck) ───────────────────────────
+if command -v shellcheck >/dev/null 2>&1; then
+    if ! shellcheck -S warning "$OUT_FILE"; then
+        echo "  ✗ Shellcheck warnings detected!"
+        exit 1
+    fi
+    echo "  ✓ Shellcheck passed"
+else
+    echo "  ⚠ shellcheck not installed — skipping static analysis"
 fi
 
 # ── Navigation validation ──────────────────────────────────

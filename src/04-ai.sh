@@ -9,18 +9,6 @@ OPENCODE_BIN="${HOME}/.opencode/bin/opencode"
 OPENCODE_PROCESS="opencode"
 OPENCODE_CFG="${HOME}/.config/opencode"
 
-owui_check() {
-    if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qi "open-webui"; then
-        echo -e "  ${WARN}  Open WebUI container not running"
-        return 1
-    fi
-    if ! curl -sf "${OWUI_URL}" >/dev/null 2>&1; then
-        echo -e "  ${WARN}  Open WebUI not reachable on ${OWUI_URL}"
-        return 1
-    fi
-    return 0
-}
-
 _opencode_available() {
     command -v opencode >/dev/null 2>&1 || [[ -x "${OPENCODE_BIN}" ]]
 }
@@ -186,8 +174,8 @@ cc_launch() {
 
     if [[ -z "$oc_cmd" ]]; then
         echo -e "  ${FAIL}  OpenCode not found at ${OPENCODE_BIN}"
-        echo -e "  ${DIM}  Install: curl -fsSL https://opencode.ai/install -o /tmp/opencode-install.sh${NC}"
-        echo -e "  ${DIM}  Review:  less /tmp/opencode-install.sh && bash /tmp/opencode-install.sh${NC}"
+        echo -e "  ${DIM}  Install: curl -fsSL https://opencode.ai/install -o ${ZMENU_TMP_DIR}/opencode-install.sh${NC}"
+        echo -e "  ${DIM}  Review:  less ${ZMENU_TMP_DIR}/opencode-install.sh && bash ${ZMENU_TMP_DIR}/opencode-install.sh${NC}"
         return 1
     fi
 
@@ -201,7 +189,7 @@ cc_launch() {
     # Write context into opencode rules so it's injected automatically
     _cc_write_rules "$full_context"
 
-    local session_file="/tmp/zmenu-session-$(date +%s).md"
+    local session_file="${ZMENU_TMP_DIR}/zmenu-session-$(date +%s).md"
     printf '%s' "$full_context" > "$session_file"
     echo -e "  ${OK}  Context injected → ${OPENCODE_CFG}/rules.md"
     echo ""
@@ -329,7 +317,7 @@ instead suggest the NEXT logical step.
 - Do not re-interpret output that was already shown earlier in the conversation. If the user sends a blank message or just presses enter, ask what they want to do next rather than repeating prior output."
 
     local last_ai_response=""
-    local hist_file; hist_file="/tmp/zmenu-chat-$(date +%s).json"
+    local hist_file; hist_file="${ZMENU_TMP_DIR}/zmenu-chat-$(date +%s).json"
     printf '[]' > "$hist_file"
 
     _cc_inline_header "$section_title" "$scoped_context"
@@ -348,12 +336,9 @@ instead suggest the NEXT logical step.
         if [[ "$user_input" == "apply" || "$user_input" == "apply that" ]]; then
             echo ""
             if [[ -n "$apply_fn" ]] && declare -f "$apply_fn" >/dev/null 2>&1; then
-                # Extract proposed commands for preview
+                # Extract proposed commands for preview (same extractor as execution)
                 local proposed_cmds
-                proposed_cmds=$(echo "$last_ai_response" | awk '/^```/{p=!p; next} p && /[^[:space:]]/{print}')
-                if [[ -z "$proposed_cmds" ]]; then
-                    proposed_cmds=$(echo "$last_ai_response" | grep -E '^[[:space:]]*(sudo |systemctl |sysctl |docker |pkill |kill |apt |mkdir |rm |cp |mv |chmod |chown |python3 |pip |curl |powerprofilesctl |journalctl |sed |awk |tee |cat |echo |printf |export |unset |git |wget |dmesg |cpupower )')
-                fi
+                proposed_cmds=$(_apply_extract_commands "$last_ai_response")
                 if [[ -n "$proposed_cmds" ]]; then
                     echo -e "  ${BCYN}Commands to execute:${NC}"
                     echo "$proposed_cmds" | sed 's/^/    /'
@@ -374,8 +359,8 @@ instead suggest the NEXT logical step.
                 fi
             else
                 echo -e "  ${WARN}  No auto-apply for this section — copy from above."
-                printf '%s\n' "$last_ai_response" > /tmp/zmenu-ai-apply.txt
-                echo -e "  ${DIM}  Also saved → /tmp/zmenu-ai-apply.txt${NC}"
+                printf '%s\n' "$last_ai_response" > "${ZMENU_TMP_DIR}/zmenu-ai-apply.txt"
+                echo -e "  ${DIM}  Also saved → ${ZMENU_TMP_DIR}/zmenu-ai-apply.txt${NC}"
             fi
             echo ""
             continue
@@ -425,7 +410,9 @@ json.dump(h,open(hf,'w'))
 _cc_inline_header() {
     local section_title="$1"
     local context_summary="$2"
-    clear
+    if [[ -t 1 && "${ZMENU_HEADLESS:-0}" != "1" ]]; then
+        clear
+    fi
     printf '\033[1;34m'
     echo "  ┌─────────────────────────────────────────────────────────┐"
     printf "  │  ▲  Z-MENU  v%-6s  ·  LOCAL SOVEREIGN                │\n" "$ZMENU_VERSION"

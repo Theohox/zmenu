@@ -4,7 +4,7 @@ A single-file bash CLI dashboard for AMD Strix Halo laptops running Ubuntu 24.04
 No cloud dependency, no telemetry, no install script — one file, dropped in `/usr/local/bin`.
 
 **Tested on:** HP ZBook Ultra 14 G1a · AMD Ryzen AI MAX+ PRO 395 · Radeon 8060S (gfx1151) · Ubuntu 24.04 LTS  
-**Version:** 5.13.2
+**Version:** 5.14.0
 
 ---
 
@@ -44,7 +44,8 @@ src/
 ```
 
 Run `./build.sh` to concatenate all sources into `zmenu.sh`. The built file is what gets installed
-to `/usr/local/bin/zmenu`. Build includes automated navigation validation.
+to `/usr/local/bin/zmenu`. Build includes `bash -n` syntax check, `shellcheck` static analysis
+(when installed), and automated navigation validation.
 
 ### Three Layers
 
@@ -89,8 +90,7 @@ required** — all dashboard features work standalone.
 |------|-----------|-------|
 | **Ollama** | Process + port 11434 | Primary inference backend |
 | **OpenCode** | `~/.opencode/bin/opencode` | TUI coding agent |
-| **LM Studio** | Port 1234 | Monitored only (status, model dir size) |
-| **Claude Code** | `claude` on `$PATH` | Discovered as installed app only |
+| **LM Studio** | Process + port 1234/8080 | Monitored only (status, model dir size) |
 | **LLM-Gateway** | Process + port 8090 | Local gateway for model routing |
 | **LiteLLM** | Process + port 4000 | AI gateway / proxy |
 | **vLLM** | Process + port 8000 | High-throughput inference engine |
@@ -134,7 +134,7 @@ Memory Pool    ●  9187/128075 MB used ▼(-5MB) ·  118888 MB available
 
 ### Global Shortcuts
 
-From any screen:
+From the dashboard:
 
 | Key | Action |
 |-----|--------|
@@ -143,6 +143,8 @@ From any screen:
 | `?` | Context-sensitive help |
 | `E` | Export markdown report |
 | `q` | Quit zmenu |
+
+Most submenus also support `r` (refresh/back), `q` (quit), and `E` (export) where applicable.
 
 ### 1) KILL MODE — Stop the Bullshit
 The first thing you see when your machine is melting. A proper task manager:
@@ -178,11 +180,17 @@ Optional management panel for local inference tools:
 - Start / stop the `lemond` orchestrator
 - Live backend inventory: llama-server, sd-server, whisper-server, kokoro-server
 - Per-backend PID, port, and RAM footprint
+- List downloaded models, unload a model, and view backend recipes via the `lemonade` CLI
+- Ask AI about Lemonade status and configuration
 - Kill all Lemonade processes (SIGTERM with verify)
 
 **Hermes:**
 - Start / stop the Hermes desktop + CLI + gateway stack
+- Start `hermes gateway run` in the background
+- Launch the Hermes Desktop Electron app (`hermes-desktop`)
+- Launch the Hermes TUI (`hermes --tui`)
 - Per-component PID visibility (Desktop, CLI, Gateway)
+- Ask AI about Hermes status and configuration
 - Kill all Hermes processes (SIGTERM with verify)
 
 ### 3) Docker & Services
@@ -202,8 +210,9 @@ Registry-driven inventory of every tool and service on the machine:
 - Unknown processes scan — processes not in the registry, risk-tiered
 - Export full scan report to markdown
 
-Default registry includes: Ollama, LM Studio, Claude Code, OpenCode, Lemonade, Hermes,
-Open WebUI, Crawl4AI, n8n, SearXNG, Tailscale, OpenVPN, Docker, Node.js, Python3, Rust/Cargo, pip3.
+Default registry includes: Ollama, LM Studio, OpenCode, LLM-Gateway, Lemonade, Hermes,
+LiteLLM, vLLM, ComfyUI, Triton, SGLang, TabbyAPI, LocalAI, Open WebUI, Crawl4AI, n8n,
+SearXNG, Tailscale, OpenVPN, nginx, Docker, ctop, Node.js, Python3, Rust/Cargo, pip3.
 
 Adding a new app: one line in the `_SCAN_REGISTRY` array. Scanner and wiki pick it up automatically.
 
@@ -245,6 +254,24 @@ Project-aware workspace:
 - Wiki viewer and force-refresh
 - Environment inspector: shows current $PATH, GPU env vars, HSA settings
 - Reinstall / update zmenu binary
+
+### 9) Security & Privacy
+- Open ports audit and listening service inventory
+- Firewall status (UFW + DOCKER-USER chain check)
+- Failed SSH login audit and sudo/auth event review
+- Rootkit quick check (rkhunter / chkrootkit)
+- Outbound connection snapshot
+- Telemetry opt-out variable status and guided lockdown
+- Browser privacy flags (Chromium + Firefox)
+- Tailscale status, stop, and disable
+- Service audit for Ollama, Docker, and snap metrics
+
+### 0) Maintenance
+- APT update / upgrade check and guided upgrade
+- Disk audit with cleanup (apt clean, autoremove, journal vacuum)
+- SMART disk health check
+- Journal error review (last 24h)
+- Journal size trim (vacuum to 200MB)
 
 ---
 

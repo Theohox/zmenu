@@ -2,7 +2,7 @@
 # ============================================================
 
 cfg_init() {
-    mkdir -p "$ZMENU_CONFIG_DIR"
+    mkdir -m 700 -p "$ZMENU_CONFIG_DIR"
     [[ -f "$ZMENU_CONFIG_FILE" ]] && return
     cat > "$ZMENU_CONFIG_FILE" << 'EOF'
 # Z-Menu Configuration
@@ -10,6 +10,13 @@ cfg_init() {
 
 # Directory scanned for projects
 ZMENU_PROJECTS_DIR="${HOME}/projects"
+
+# LLM-Gateway source/build directory (only needed if you run llm-gateway locally)
+LLM_GATEWAY_DIR="${HOME}/projects/llm-gateway"
+
+# Lemonade and Hermes binaries (defaults usually work if they are on $PATH)
+ZMENU_LEMONADE_BIN="lemond"
+ZMENU_HERMES_BIN="hermes"
 
 # Preferred model for AI sessions (leave empty to auto-select)
 ZMENU_AI_MODEL=""
@@ -45,6 +52,7 @@ ZMENU_ALERT_LOAD_MULTIPLIER=2
 # Number of historical data points to show (default: 30 ≈ 15 min at 30s intervals)
 ZMENU_SPARKLINE_POINTS=30
 EOF
+    chmod 600 "$ZMENU_CONFIG_FILE" 2>/dev/null || true
     echo -e "  ${BGRN}✓${NC}  Config created: ${ZMENU_CONFIG_FILE}"
 }
 
@@ -54,11 +62,14 @@ cfg_load() {
     local _mode _owner
     _mode=$(stat -c '%a' "$ZMENU_CONFIG_FILE" 2>/dev/null || echo "")
     _owner=$(stat -c '%u' "$ZMENU_CONFIG_FILE" 2>/dev/null || echo "")
-    if [[ -n "$_mode" && "$_mode" != "600" && "$_mode" != "644" && "$_mode" != "640" ]]; then
-        echo -e "  ${WARN}  Config file permissions ($_mode) are too permissive. Run: chmod 600 $ZMENU_CONFIG_FILE"
-    fi
     if [[ -n "$_owner" && "$_owner" != "$(id -u)" ]]; then
-        echo -e "  ${FAIL}  Config file is not owned by you. Aborting."
+        echo -e "  ${FAIL}  Config file is not owned by you. Aborting." >&2
+        return 1
+    fi
+    if [[ -n "$_mode" && "$_mode" != "600" && "${ZMENU_CONFIG_PERMISSIVE:-0}" != "1" ]]; then
+        echo -e "  ${FAIL}  Config file permissions ($_mode) are too permissive." >&2
+        echo -e "         Run: chmod 600 ${ZMENU_CONFIG_FILE}" >&2
+        echo -e "         Or override: ZMENU_CONFIG_PERMISSIVE=1 zmenu" >&2
         return 1
     fi
     # shellcheck source=/dev/null
@@ -67,7 +78,31 @@ cfg_load() {
 }
 
 cfg_edit() {
-    ${ZMENU_PREFERRED_EDITOR} "$ZMENU_CONFIG_FILE"
+    _run_editor "$ZMENU_CONFIG_FILE"
     cfg_load
+}
+
+# Run the user's preferred editor safely, allowing paths with spaces.
+# Usage: _run_editor [file1] [file2] ...
+_run_editor() {
+    local -a editor=()
+    IFS=' ' read -r -a editor <<< "$ZMENU_PREFERRED_EDITOR"
+    "${editor[@]}" "$@"
+}
+
+# Safely set or append a key=value in the zmenu config file.
+# Escapes sed metacharacters so arbitrary values (e.g. model names with /)
+# cannot corrupt the config.
+_cfg_set() {
+    local key="$1" value="$2"
+    local cfg="$ZMENU_CONFIG_FILE"
+    # Escape backslash, ampersand, and pipe for safe sed replacement
+    local safe_value
+    safe_value=$(printf '%s' "$value" | sed 's/[&\\|]/\\&/g')
+    if grep -q "^${key}=" "$cfg" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=\"${safe_value}\"|" "$cfg"
+    else
+        printf '%s="%s"\n' "$key" "$value" >> "$cfg"
+    fi
 }
 

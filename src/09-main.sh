@@ -12,6 +12,8 @@ main_menu() {
         echo "   6)  Find Problems           (bottleneck sweep + fixes)"
         echo "   7)  Projects               (open · create · AI sessions)"
         echo "   8)  Settings               (config · editor · reinstall)"
+        echo "   9)  Security & Privacy     (ports · firewall · telemetry · lockdown)"
+        echo "   0)  Maintenance            (updates · disk · SMART · journal)"
         echo ""
         echo "   r)  Refresh    /)  Search    ?)  Help    E)  Export    q)  Exit"
         echo ""
@@ -25,6 +27,8 @@ main_menu() {
             6) _session_log "menu_select" "Find Problems" || true; mod_find_problems ;;
             7) _session_log "menu_select" "Projects" || true; mod_projects ;;
             8) _session_log "menu_select" "Settings" || true; mod_settings ;;
+            9) _session_log "menu_select" "Security & Privacy" || true; mod_security ;;
+            0) _session_log "menu_select" "Maintenance" || true; mod_maintenance ;;
             r|R) discover ;;
             /) _search_universal ;;
             \?) _menu_help_main ;;
@@ -90,6 +94,7 @@ _watch_discover() {
 
 _watch_mode() {
     cfg_load
+    mkdir -p "$ZMENU_HISTORY_DIR"
     local _interval="${ZMENU_WATCH_INTERVAL:-30}"
     if [[ ! "$_interval" =~ ^[0-9]+$ ]] || [[ "$_interval" -lt 5 ]]; then
         echo -e "${WARN}  Invalid ZMENU_WATCH_INTERVAL ('$_interval'). Using 30s."

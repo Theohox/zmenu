@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  v5.13.2
+#  Z-MENU  v5.13.8
 #  Local Sovereign Dashboard
 #
 #  INSTALL:   ./build.sh && sudo cp zmenu.sh /usr/local/bin/zmenu
@@ -31,7 +31,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.13.8"
+readonly ZMENU_VERSION="5.14.0"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
@@ -40,10 +40,14 @@ ZMENU_CONFIG_DIR="${HOME}/.zmenu"
 ZMENU_CONFIG_FILE="${ZMENU_CONFIG_DIR}/config"
 ZMENU_WIKI_DIR="${ZMENU_CONFIG_DIR}/wiki"
 ZMENU_HISTORY_DIR="${ZMENU_CONFIG_DIR}/history"
+ZMENU_TMP_DIR="${ZMENU_CONFIG_DIR}/tmp"
 ZMENU_SESSION_LOG="${ZMENU_HISTORY_DIR}/commands.jsonl"
-ZMENU_CONTEXT_FILE="/tmp/zmenu-context.md"
-ZMENU_ERROR_LOG="/tmp/zmenu-errors.log"
+ZMENU_CONTEXT_FILE="${ZMENU_TMP_DIR}/zmenu-context.md"
+ZMENU_ERROR_LOG="${ZMENU_TMP_DIR}/zmenu-errors.log"
 ZMENU_REPORT_FILE="${HOME}/zmenu-report.md"
+
+# Ensure private temp directory exists before any sensitive files are created
+mkdir -m 700 -p "$ZMENU_TMP_DIR" 2>/dev/null || true
 
 # Default config values — overridden by config file
 ZMENU_PROJECTS_DIR="${HOME}/projects"
@@ -70,14 +74,17 @@ _on_err() {
     _safe_cmd=$(echo "$BASH_COMMAND" | sed 's/\(token\|key\|password\|secret\|api_key\|auth\)=[^[:space:]]*/\1=***/gi')
     echo "[$(date '+%H:%M:%S')] ERR line $1: $_safe_cmd" >> "$ZMENU_ERROR_LOG"
 }
+trap '_on_err $LINENO' ERR
 
 # ── Cleanup on exit ────────────────────────────────────────
 _zmenu_cleanup() {
-    rm -f /tmp/zmenu-chat-*.json /tmp/zmenu-session-*.md /tmp/zmenu-ai-apply.txt /tmp/zmenu-bp.txt 2>/dev/null || true
+    rm -f "${ZMENU_TMP_DIR}/zmenu-chat-*.json" "${ZMENU_TMP_DIR}/zmenu-session-*.md" \
+          "${ZMENU_TMP_DIR}/zmenu-ai-apply.txt" "${ZMENU_TMP_DIR}/zmenu-bp.txt" 2>/dev/null || true
 }
 trap _zmenu_cleanup EXIT
 
 # Ensure error log has restrictive permissions
+mkdir -m 700 -p "$ZMENU_TMP_DIR" 2>/dev/null || true
 touch "$ZMENU_ERROR_LOG" 2>/dev/null && chmod 600 "$ZMENU_ERROR_LOG" 2>/dev/null || true
 
 # ============================================================

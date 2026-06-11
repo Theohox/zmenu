@@ -18,13 +18,7 @@ D_LMS_MODELS=()
 AI_BACKEND_ACTIVE=""        # resolved at runtime: opencode|ollama|none
 AI_BACKEND_LABEL=""         # human-readable label for display
 
-D_AI_BIN=""
 D_AI_VER=""
-D_AI_RUNNING=false
-
-D_CLAUDE_BIN=""
-D_CLAUDE_VER=""
-D_CLAUDE_SESSION=false     # true when zmenu is running inside a Claude Code session
 
 D_DOCKER_RUNNING=false
 D_CONTAINERS=()
@@ -109,7 +103,19 @@ D_KWORKER_STORM=false
 D_RADEONTOP_AVAILABLE=false
 D_RADEONTOP_BIN=""
 D_SENSORS_AVAILABLE=false
-D_SENSORS_FULL=()
+
+# Resolve the executable path of a PID.
+# Returns the canonical path from /proc/<pid>/exe when readable, otherwise
+# falls back to the first token of the command line. This is used by the
+# unknown-process scanner instead of the truncated `comm` field.
+_proc_exe_path() {
+    local pid="$1"
+    local exe=""
+    exe=$(readlink -f "/proc/${pid}/exe" 2>/dev/null || true)
+    [[ -n "$exe" && "$exe" != "/" ]] && { printf '%s' "$exe"; return; }
+    # Fallback for kernel threads or permission-denied processes
+    ps -p "$pid" -o cmd= 2>/dev/null | awk '{print $1}'
+}
 
 # ── Build port→process collision registry ─────────────────
 # Call once before ANY port-based discovery. Prevents false positives
@@ -148,7 +154,9 @@ _disc_port_owner() {
 # Sets D_*_RUNNING and D_*_URL if successful.
 _disc_probe_service() {
     local _proc_pat="$1" _port_default="$2" _health_path="$3" _validate_field="${4:-}"
-    local _running_var="$5" _url_var="$6"
+    # Use namerefs (bash 4.3+) instead of eval for safe dynamic variable assignment
+    local -n _running_ref="$5"
+    local -n _url_ref="$6"
 
     # 1. Try process-first discovery
     local _pid
@@ -179,6 +187,7 @@ _disc_probe_service() {
             sglang)  [[ "$_owner" != *"sglang"* && "$_owner" != *"python"* ]] && return ;;
             tabbyapi) [[ "$_owner" != *"tabby"* && "$_owner" != *"python"* && "$_owner" != *"uvicorn"* ]] && return ;;
             local-ai) [[ "$_owner" != *"local"* && "$_owner" != *"python"* ]] && return ;;
+            lmstudio) [[ "$_owner" != *"lmstudio"* && "$_owner" != *"lm-studio"* ]] && return ;;
             llm-gateway) [[ "$_owner" == *"lemond"* || "$_owner" == *"lemonade"* ]] && return ;;
         esac
     fi
@@ -201,9 +210,9 @@ except: print('')
         [[ -z "$_has_field" ]] && return
     fi
 
-    # 5. Success — set variables via eval
-    eval "$_running_var=true"
-    eval "$_url_var=\"$_url\""
+    # 5. Success — set variables via nameref
+    _running_ref=true
+    _url_ref="$_url"
 }
 
 discover() {
@@ -219,7 +228,6 @@ discover() {
     _disc_lms || true
     _disc_llm_gateway || true
     _disc_ai_tool || true
-    _disc_claude || true
     _disc_docker || true
     _disc_gpu || true
     _disc_npu || true
@@ -398,19 +406,29 @@ _disc_ollama() {
     done
     [[ "$D_OLLAMA_RUNNING" == false ]] && return
 
-    # Active model
-    local ps
-    ps=$(curl -sf --max-time 2 "${D_OLLAMA_URL}/api/ps" 2>/dev/null || echo "")
-    D_OLLAMA_ACTIVE_MODEL=$(echo "$ps" \
-        | grep -o '"name":"[^"]*"' | head -1 \
-        | sed 's/"name":"//;s/"//' || echo "")
+    # Active model and all models — parse with Python for reliability
+    local _ollama_json
+    _ollama_json=$(curl -sf --max-time 2 "${D_OLLAMA_URL}/api/ps" 2>/dev/null || echo "{}")
+    D_OLLAMA_ACTIVE_MODEL=$(printf '%s' "$_ollama_json" | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    models=d.get("models",[])
+    print(models[0].get("name","") if models else "")
+except Exception:
+    print("")
+' 2>/dev/null || echo "")
 
-    # All models
-    local tags
-    tags=$(curl -sf --max-time 1 "${D_OLLAMA_URL}/api/tags" 2>/dev/null || echo "")
+    _ollama_json=$(curl -sf --max-time 1 "${D_OLLAMA_URL}/api/tags" 2>/dev/null || echo "{}")
     while IFS= read -r name; do
         [[ -n "$name" ]] && D_OLLAMA_MODELS+=("$name")
-    done < <(echo "$tags" | grep -o '"name":"[^"]*"' | sed 's/"name":"//;s/"//')
+    done < <(printf '%s' "$_ollama_json" | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    for m in d.get("models",[]): print(m.get("name",""))
+except Exception: pass
+' 2>/dev/null)
 
     # Tool-capable models (skip if ollama binary not found)
     if command -v ollama >/dev/null 2>&1; then
@@ -424,21 +442,22 @@ _disc_ollama() {
 
 # ── LM Studio ──────────────────────────────────────────────
 _disc_lms() {
-    local candidates=(1234 1235 8080)
-    for port in "${candidates[@]}"; do
-        local url="http://localhost:${port}"
-        if curl -sf --max-time 0.2 "${url}/v1/models" >/dev/null 2>&1; then
-            D_LMS_URL="$url"
-            D_LMS_RUNNING=true
-            break
-        fi
-    done
-    [[ "$D_LMS_RUNNING" == false ]] && return
+    # Use process-first discovery with port-collision registry.
+    _disc_probe_service "lmstudio" "1234" "/v1/models" "data" \
+        "D_LMS_RUNNING" "D_LMS_URL" || true
+    [[ "$D_LMS_RUNNING" != true ]] && return
+
     local resp
     resp=$(curl -sf --max-time 3 "${D_LMS_URL}/v1/models" 2>/dev/null || echo "")
     while IFS= read -r id; do
         [[ -n "$id" ]] && D_LMS_MODELS+=("$id")
-    done < <(echo "$resp" | grep -o '"id":"[^"]*"' | sed 's/"id":"//;s/"//')
+    done < <(printf '%s' "$resp" | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    for m in d.get("data",[]): print(m.get("id",""))
+except Exception: pass
+' 2>/dev/null)
 }
 
 # ── LLM-Gateway (Rust slot orchestrator) ─────────────────
@@ -498,21 +517,11 @@ except: pass
 " 2>/dev/null || true)
 }
 
-# ── Local AI tool (Ollama binary) ──────────────────────────
+# ── Local AI tool (Ollama binary version) ──────────────────
 _disc_ai_tool() {
-    D_AI_BIN=$(command -v ollama 2>/dev/null || echo "")
-    [[ -z "$D_AI_BIN" ]] && return
-    D_AI_RUNNING=true
+    command -v ollama >/dev/null 2>&1 || return
     D_AI_VER=$(ollama --version 2>/dev/null \
         | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1 || echo "?")
-}
-
-_disc_claude() {
-    # Hard-disabled to avoid any startup risk from missing/removed claude tooling.
-    D_CLAUDE_BIN=""
-    D_CLAUDE_VER=""
-    D_CLAUDE_SESSION=false
-    return 0
 }
 
 # ── Docker ─────────────────────────────────────────────────
@@ -629,12 +638,13 @@ _disc_lemonade() {
 
     D_LEMONADE_RUNNING=true
     D_LEMONADE_PID="$pid"
-    # Prefer port 8090 (Lemonade API) if found, otherwise first match
+    # Prefer port 8090 (Lemonade API); fall back to the lowest listening port
     local _ports
     _ports=$(ss -tlnp 2>/dev/null | awk -v p="$pid" '$0 ~ "pid="p"," {n=split($4,a,":"); print a[n]}' | sort -n || true)
     D_LEMONADE_PORT="8090"
     while IFS= read -r _p; do
-        [[ -n "$_p" ]] && D_LEMONADE_PORT="$_p"
+        [[ -z "$_p" ]] && continue
+        D_LEMONADE_PORT="$_p"
         [[ "$_p" == "8090" ]] && break
     done <<< "$_ports"
 
@@ -655,18 +665,30 @@ _disc_lemonade() {
     done
 }
 
-# ── Hermes (desktop + CLI gateway) ─────────────────────────
+# ── Hermes (desktop + CLI + gateway) ───────────────────────
 _disc_hermes() {
     D_HERMES_RUNNING=false
     D_HERMES_DESKTOP_PID=""
     D_HERMES_CLI_PID=""
     D_HERMES_GATEWAY_PID=""
 
-    D_HERMES_DESKTOP_PID=$(pgrep -f "Hermes" 2>/dev/null | head -1 || true)
-    D_HERMES_CLI_PID=$(pgrep -x "hermes_cli" 2>/dev/null | head -1 || true)
-    [[ -z "$D_HERMES_CLI_PID" ]] && D_HERMES_CLI_PID=$(pgrep -f "hermes_cli" 2>/dev/null | head -1 || true)
-    D_HERMES_GATEWAY_PID=$(pgrep -f "python.*hermes.*gateway" 2>/dev/null | head -1 || true)
-    [[ -z "$D_HERMES_GATEWAY_PID" ]] && D_HERMES_GATEWAY_PID=$(pgrep -f "python.*hermes" 2>/dev/null | head -1 || true)
+    # Electron desktop app (launched by `hermes-desktop` wrapper or directly)
+    D_HERMES_DESKTOP_PID=$(pgrep -x "Hermes" 2>/dev/null | head -1 || true)
+    [[ -z "$D_HERMES_DESKTOP_PID" ]] && D_HERMES_DESKTOP_PID=$(pgrep -fx "*/Hermes" 2>/dev/null | head -1 || true)
+    [[ -z "$D_HERMES_DESKTOP_PID" ]] && D_HERMES_DESKTOP_PID=$(pgrep -f "hermes-desktop" 2>/dev/null | head -1 || true)
+
+    # Gateway: hermes gateway run / hermes gateway start
+    D_HERMES_GATEWAY_PID=$(pgrep -f "hermes gateway" 2>/dev/null | head -1 || true)
+
+    # CLI/TUI: a hermes process that is NOT the gateway
+    local _pid
+    for _pid in $(pgrep -x "hermes" 2>/dev/null || true); do
+        if [[ "$_pid" != "$D_HERMES_GATEWAY_PID" ]] && \
+           ! tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null | grep -q "hermes gateway"; then
+            D_HERMES_CLI_PID="$_pid"
+            break
+        fi
+    done
 
     [[ -n "$D_HERMES_DESKTOP_PID" || -n "$D_HERMES_CLI_PID" || -n "$D_HERMES_GATEWAY_PID" ]] && D_HERMES_RUNNING=true
 }
@@ -937,6 +959,5 @@ _sel_ai_backend() {
     esac
 }
 
-# Keep old name as alias for any external calls
-_sel_ai_model() { _sel_ai_backend; }
+
 
