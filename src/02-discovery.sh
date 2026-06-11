@@ -117,7 +117,7 @@ discover() {
     _disc_ports || true
     _sel_ai_backend || true
     ( _wiki_full_refresh ) 2>/dev/null || true
-    _history_append
+    _history_append || true
 }
 
 # ── History & Persistence ──────────────────────────────────

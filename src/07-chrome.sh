@@ -135,16 +135,16 @@ dashboard() {
     _disc_lemonade || true
     _disc_hermes || true
     _disc_process_groups || true
-    _history_load_trend 5
+    _history_load_trend 5 || true
 
     # Load sparkline data
     local _spark_gpu="" _spark_ram="" _spark_load=""
     local _pts="${ZMENU_SPARKLINE_POINTS:-30}"
-    _sparkline_read "gpu_temp" "$_pts"
+    _sparkline_read "gpu_temp" "$_pts" || true
     [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_gpu=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
-    _sparkline_read "ram_used_mb" "$_pts"
+    _sparkline_read "ram_used_mb" "$_pts" || true
     [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_ram=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
-    _sparkline_read "load1" "$_pts"
+    _sparkline_read "load1" "$_pts" || true
     [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_load=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
 
     # ── AI Engine (computed early, rendered last) ─────────

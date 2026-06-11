@@ -17,14 +17,14 @@ main_menu() {
         echo ""
         read -rp "  $(printf '%b' "${BOLD}Selection:${NC} ")" choice
         case $choice in
-            1) _session_log "menu_select" "KILL MODE"; mod_kill_mode ;;
-            2) _session_log "menu_select" "AI Engine"; mod_ai_engine ;;
-            3) _session_log "menu_select" "Docker & Services"; mod_apps_services ;;
-            4) _session_log "menu_select" "System Scan"; mod_system_scan ;;
-            5) _session_log "menu_select" "Hardware"; mod_hardware ;;
-            6) _session_log "menu_select" "Find Problems"; mod_find_problems ;;
-            7) _session_log "menu_select" "Projects"; mod_projects ;;
-            8) _session_log "menu_select" "Settings"; mod_settings ;;
+            1) _session_log "menu_select" "KILL MODE" || true; mod_kill_mode ;;
+            2) _session_log "menu_select" "AI Engine" || true; mod_ai_engine ;;
+            3) _session_log "menu_select" "Docker & Services" || true; mod_apps_services ;;
+            4) _session_log "menu_select" "System Scan" || true; mod_system_scan ;;
+            5) _session_log "menu_select" "Hardware" || true; mod_hardware ;;
+            6) _session_log "menu_select" "Find Problems" || true; mod_find_problems ;;
+            7) _session_log "menu_select" "Projects" || true; mod_projects ;;
+            8) _session_log "menu_select" "Settings" || true; mod_settings ;;
             r|R) discover ;;
             /) _search_universal ;;
             \?) _menu_help_main ;;
@@ -41,11 +41,12 @@ main_menu() {
 
 _watch_check_thresholds() {
     local alerts=""
-    # GPU temp: strip decimal before integer comparison
+    # GPU temp: strip decimal before integer comparison, guard against non-numeric
     local _gpu_temp_int="${D_GPU_TEMP:-0}"
     _gpu_temp_int="${_gpu_temp_int%%.*}"
-    [[ "$_gpu_temp_int" -gt "${ZMENU_ALERT_GPU_TEMP:-85}" ]] && \
+    if [[ "$_gpu_temp_int" =~ ^[0-9]+$ ]] && [[ "$_gpu_temp_int" -gt "${ZMENU_ALERT_GPU_TEMP:-85}" ]]; then
         alerts+="GPU temp: ${D_GPU_TEMP}°C (threshold: ${ZMENU_ALERT_GPU_TEMP:-85}°C)\n"
+    fi
     local ram_pct=0
     local _mem_total="${D_MEM_TOTAL_MB:-0}"
     local _mem_used="${D_MEM_USED_MB:-0}"
@@ -64,7 +65,8 @@ _watch_check_thresholds() {
 
 _watch_alert() {
     local key="$1" message="$2"
-    local state_file="/tmp/zmenu-alert-${key}"
+    # Write state files to ZMENU_HISTORY_DIR (user-owned, not world-writable /tmp)
+    local state_file="${ZMENU_HISTORY_DIR}/.alert-${key}"
     local last_alert=0 now
     now=$(date +%s)
     [[ -f "$state_file" ]] && last_alert=$(cat "$state_file" 2>/dev/null || echo "0")
@@ -88,7 +90,12 @@ _watch_discover() {
 
 _watch_mode() {
     cfg_load
-    echo -e "${DIM}  zmenu watch mode — checking every ${ZMENU_WATCH_INTERVAL:-30}s${NC}"
+    local _interval="${ZMENU_WATCH_INTERVAL:-30}"
+    if [[ ! "$_interval" =~ ^[0-9]+$ ]] || [[ "$_interval" -lt 5 ]]; then
+        echo -e "${WARN}  Invalid ZMENU_WATCH_INTERVAL ('$_interval'). Using 30s."
+        _interval=30
+    fi
+    echo -e "${DIM}  zmenu watch mode — checking every ${_interval}s${NC}"
     echo "  Press Ctrl+C to stop"
     echo ""
     while true; do
@@ -103,7 +110,7 @@ _watch_mode() {
                 _watch_alert "$key" "$line"
             done <<< "$alerts"
         fi
-        sleep "${ZMENU_WATCH_INTERVAL:-30}"
+        sleep "$_interval"
     done
 }
 

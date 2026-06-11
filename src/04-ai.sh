@@ -460,8 +460,11 @@ instead suggest the NEXT logical step.
                     fi
                 fi
                 echo -e "  ${BCYN}✦ Applying...${NC}"
-                "$apply_fn" "$last_ai_response"
-                echo -e "  ${OK}  Applied."
+                if "$apply_fn" "$last_ai_response"; then
+                    echo -e "  ${OK}  Applied."
+                else
+                    echo -e "  ${WARN}  Apply returned with issues — check output above."
+                fi
             else
                 echo -e "  ${WARN}  No auto-apply for this section — copy from above."
                 printf '%s\n' "$last_ai_response" > /tmp/zmenu-ai-apply.txt

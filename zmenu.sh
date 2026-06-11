@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Z-MENU  —  Built 2026-06-10 19:40:16
+#  Z-MENU  —  Built 2026-06-10 20:14:09
 #  Auto-generated from src/*.sh — edit sources, not this file
 #  Build: ./build.sh
 # ============================================================
@@ -43,7 +43,7 @@
 set -euo pipefail
 
 # ── Version ────────────────────────────────────────────────
-readonly ZMENU_VERSION="5.13.2"
+readonly ZMENU_VERSION="5.13.3"
 readonly ZMENU_SELF="$(realpath "${BASH_SOURCE[0]}")"
 readonly ZMENU_INSTALL_PATH="/usr/local/bin/zmenu"
 
@@ -305,7 +305,7 @@ discover() {
     _disc_ports || true
     _sel_ai_backend || true
     ( _wiki_full_refresh ) 2>/dev/null || true
-    _history_append
+    _history_append || true
 }
 
 # ── History & Persistence ──────────────────────────────────
@@ -1571,8 +1571,11 @@ instead suggest the NEXT logical step.
                     fi
                 fi
                 echo -e "  ${BCYN}✦ Applying...${NC}"
-                "$apply_fn" "$last_ai_response"
-                echo -e "  ${OK}  Applied."
+                if "$apply_fn" "$last_ai_response"; then
+                    echo -e "  ${OK}  Applied."
+                else
+                    echo -e "  ${WARN}  Apply returned with issues — check output above."
+                fi
             else
                 echo -e "  ${WARN}  No auto-apply for this section — copy from above."
                 printf '%s\n' "$last_ai_response" > /tmp/zmenu-ai-apply.txt
@@ -1702,8 +1705,7 @@ _APPLY_ALLOWED_PREFIXES=(
 # then validates no dangerous metacharacters exist before executing.
 _apply_safe_exec() {
     local cmd="$1"
-    local -a args=()
-    local arg="" in_quote="" ch escaped=false
+    local -a args=() arg="" in_quote="" ch escaped=false
 
     # Parse command string into array, respecting quotes
     for ((i=0; i<${#cmd}; i++)); do
@@ -1755,8 +1757,9 @@ _apply_safe_exec() {
         fi
     done
 
-    # Execute safely — no re-parsing, no eval
-    "${args[@]}" 2>/dev/null
+    # Execute safely — no re-parsing, no eval.
+    # Redirect stderr to error log so users see failures (e.g. sudo password prompt)
+    "${args[@]}" 2>>"$ZMENU_ERROR_LOG"
 }
 
 # Extract and run AI-suggested commands safely.
@@ -1791,6 +1794,7 @@ _apply_generic() {
         return 1
     fi
 
+    local _ran_ok=false
     while IFS= read -r cmd; do
         [[ -z "$cmd" ]] && continue
 
@@ -1798,7 +1802,29 @@ _apply_generic() {
         #    the shell, or cause duplicate daemon instances.
         local _blocked=false
         local _block_reason=""
-        # Kill zmenu or the current shell
+
+        # 1) Determine the actual command (strip sudo)
+        local _check_cmd="$cmd"
+        [[ "$cmd" == sudo* ]] && _check_cmd="${cmd#sudo }"
+        local _first_word="${_check_cmd%% *}"
+
+        # 2) Allowlist check — first word must be in _APPLY_ALLOWED_PREFIXES
+        local _allowed=false
+        local _prefix
+        for _prefix in "${_APPLY_ALLOWED_PREFIXES[@]}"; do
+            [[ "$_first_word" == "$_prefix" ]] && { _allowed=true; break; }
+        done
+        if ! $_allowed; then
+            _blocked=true; _block_reason="command '$_first_word' is not in the allowlist"
+        fi
+
+        # 3) Block subshell wrappers (bash/sh/python3 with -c)
+        if [[ "$_first_word" == "bash" || "$_first_word" == "sh" || "$_first_word" == "python3" ]] && \
+           [[ "$cmd" == *" -c "* || "$cmd" == *" -c"* ]]; then
+            _blocked=true; _block_reason="subshell with -c not allowed (injection risk)"
+        fi
+
+        # 4) Kill zmenu or the current shell
         if printf '%s' "$cmd" | grep -qE "(pkill|killall|kill)[[:space:]].*zmenu"; then
             _blocked=true; _block_reason="would kill zmenu itself"
         fi
@@ -1813,11 +1839,27 @@ _apply_generic() {
         if printf '%s' "$cmd" | grep -qE "^[[:space:]]*(zmenu|${ZMENU_INSTALL_PATH})[[:space:]]*\$"; then
             _blocked=true; _block_reason="cannot re-launch zmenu from inside zmenu"
         fi
-        # Destructive rm
-        if printf '%s' "$cmd" | grep -qE "rm[[:space:]]+-[a-z]*r[a-z]*f[[:space:]]+/"; then
-            _blocked=true; _block_reason="destructive recursive rm on root path"
+
+        # 5) Destructive rm — check parsed args, not raw string
+        if [[ "$_first_word" == "rm" ]]; then
+            local _has_r=false _has_f=false _has_root=false
+            local _a
+            for _a in $cmd; do
+                [[ "$_a" == "rm" ]] && continue
+                [[ "$_a" == sudo ]] && continue
+                # Strip quotes for flag detection
+                local _b="${_a//\"/}"
+                _b="${_b//\'/}"
+                [[ "${_b#-}" == *"r"* || "${_b#-}" == *"R"* ]] && _has_r=true
+                [[ "${_b#-}" == *"f"* || "${_b#-}" == *"F"* ]] && _has_f=true
+                [[ "$_b" == "/" || "$_b" == "/"* ]] && _has_root=true
+            done
+            if $_has_r && $_has_f && $_has_root; then
+                _blocked=true; _block_reason="destructive recursive rm on root path"
+            fi
         fi
-        # Command substitution — injection risk
+
+        # 6) Command substitution — injection risk
         if printf '%s' "$cmd" | grep -qE '\$\(.*\)|`.*`'; then
             _blocked=true; _block_reason="command substitution not allowed (injection risk)"
         fi
@@ -1830,21 +1872,24 @@ _apply_generic() {
             echo -e "  ${FAIL}  BLOCKED: ${cmd}"
             echo -e "  ${DIM}  Reason: ${_block_reason}${NC}"
             _wiki_log_change "$section" "$cmd" "BLOCKED — ${_block_reason}"
-            _session_log "apply" "$cmd" "BLOCKED — ${_block_reason}"
+            _session_log "apply" "$cmd" "BLOCKED — ${_block_reason}" || true
             continue
         fi
 
         echo -e "  ${DIM}Running: ${cmd}${NC}"
         if _apply_safe_exec "$cmd"; then
+            _ran_ok=true
             echo -e "  ${OK}  OK"
             _wiki_log_change "$section" "$cmd" "OK"
-            _session_log "apply" "$cmd" "OK"
+            _session_log "apply" "$cmd" "OK" || true
         else
             echo -e "  ${WARN}  Non-zero: ${cmd}"
             _wiki_log_change "$section" "$cmd" "FAIL"
-            _session_log "apply" "$cmd" "FAIL"
+            _session_log "apply" "$cmd" "FAIL" || true
         fi
     done <<< "$cmds"
+
+    $_ran_ok
 }
 
 # Section-specific wrappers (pass section name for wiki log)
@@ -3121,16 +3166,16 @@ dashboard() {
     _disc_lemonade || true
     _disc_hermes || true
     _disc_process_groups || true
-    _history_load_trend 5
+    _history_load_trend 5 || true
 
     # Load sparkline data
     local _spark_gpu="" _spark_ram="" _spark_load=""
     local _pts="${ZMENU_SPARKLINE_POINTS:-30}"
-    _sparkline_read "gpu_temp" "$_pts"
+    _sparkline_read "gpu_temp" "$_pts" || true
     [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_gpu=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
-    _sparkline_read "ram_used_mb" "$_pts"
+    _sparkline_read "ram_used_mb" "$_pts" || true
     [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_ram=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
-    _sparkline_read "load1" "$_pts"
+    _sparkline_read "load1" "$_pts" || true
     [[ -n "${D_SPARKLINE_VALS:-}" ]] && _spark_load=$(_sparkline_render "$D_SPARKLINE_VALS" "$D_SPARKLINE_MAX")
 
     # ── AI Engine (computed early, rendered last) ─────────
@@ -4822,6 +4867,11 @@ _zenny_systemd_install() {
         systemctl status "$_ZENNY_SERVICE" --no-pager -l 2>/dev/null | head -10 | sed 's/^/  /'
         return
     fi
+    # Validate paths before writing to systemd (prevent injection via config)
+    if [[ "$ZENNY_BINARY" != /* ]] || [[ "$ZENNY_BINARY" == *$'\n'* ]] || [[ "$ZENNY_LOG" == *$'\n'* ]]; then
+        echo -e "  ${FAIL}  Invalid path in ZENNY_BINARY or ZENNY_LOG — aborting"
+        return 1
+    fi
     echo "  Creating ${_ZENNY_SERVICE_FILE}..."
     sudo tee "$_ZENNY_SERVICE_FILE" > /dev/null << SVCEOF
 [Unit]
@@ -5343,12 +5393,12 @@ _ai_ollama_env_set() {
         sudo mkdir -p "$override_dir" 2>/dev/null || { echo -e "  ${FAIL}  Failed"; return 1; }
     fi
     if [[ ! -f "$override_file" ]]; then
-        sudo bash -c "echo '[Service]' > '${override_file}'" 2>/dev/null
+        printf '%s\n' '[Service]' | sudo tee "$override_file" >/dev/null 2>/dev/null
     fi
     if sudo grep -q "Environment=\"${key}=" "$override_file" 2>/dev/null; then
         sudo sed -i "s|Environment=\"${key}=.*\"|Environment=\"${key}=${val}\"|" "$override_file" 2>/dev/null
     else
-        sudo bash -c "echo 'Environment=\"${key}=${val}\"' >> '${override_file}'" 2>/dev/null
+        printf '%s\n' "Environment=\"${key}=${val}\"" | sudo tee -a "$override_file" >/dev/null 2>/dev/null
     fi
     echo -e "  ${OK}  Set ${key}=${val}"
 }
@@ -8528,35 +8578,76 @@ _search_universal() {
     printf '  Query: '
     local query=""
     IFS= read -r query
-    [[ -z "$query" ]] && return
+    if [[ -z "$query" ]]; then
+        echo -e "  ${DIM}Search cancelled.${NC}"
+        sleep 0.5
+        return
+    fi
     echo ""
+
+    local _found=false
 
     # Processes
     echo -e "  ${BOLD}Processes:${NC}"
-    ps aux 2>/dev/null | grep -i "$query" | grep -v grep | head -5 | \
-        awk '{printf "    %-12s %5.1f%% %6.0f MB  %s\n", $2, $3, $6/1024, $11}' || true
+    local _procs
+    _procs=$(ps aux 2>/dev/null | grep -i "$query" | grep -v grep | head -5 | \
+        awk '{printf "    %-12s %5.1f%% %6.0f MB  %s\n", $2, $3, $6/1024, $11}' 2>/dev/null || true)
+    if [[ -n "$_procs" ]]; then
+        echo "$_procs"; _found=true
+    else
+        echo -e "    ${DIM}(no matches)${NC}"
+    fi
     echo ""
 
     # Services
     echo -e "  ${BOLD}Services:${NC}"
-    printf '%s\n' "${D_SERVICES[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' || true
+    local _svcs
+    _svcs=$(printf '%s\n' "${D_SERVICES[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' 2>/dev/null || true)
+    if [[ -n "$_svcs" ]]; then
+        echo "$_svcs"; _found=true
+    else
+        echo -e "    ${DIM}(no matches)${NC}"
+    fi
     echo ""
 
     # Ports
     echo -e "  ${BOLD}Ports:${NC}"
-    printf '%s\n' "${D_OPEN_PORTS[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' || true
+    local _ports
+    _ports=$(printf '%s\n' "${D_OPEN_PORTS[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' 2>/dev/null || true)
+    if [[ -n "$_ports" ]]; then
+        echo "$_ports"; _found=true
+    else
+        echo -e "    ${DIM}(no matches)${NC}"
+    fi
     echo ""
 
     # Wiki
     echo -e "  ${BOLD}Wiki:${NC}"
-    grep -ri "$query" "$ZMENU_WIKI_DIR"/*.md 2>/dev/null | head -5 | sed 's/^/    /' || true
+    local _wiki
+    _wiki=$(grep -ri "$query" "$ZMENU_WIKI_DIR"/*.md 2>/dev/null | head -5 | sed 's/^/    /' 2>/dev/null || true)
+    if [[ -n "$_wiki" ]]; then
+        echo "$_wiki"; _found=true
+    else
+        echo -e "    ${DIM}(no matches)${NC}"
+    fi
     echo ""
 
     # Session history
     echo -e "  ${BOLD}Recent commands:${NC}"
-    tail -20 "$ZMENU_SESSION_LOG" 2>/dev/null | grep -i "$query" | \
-        python3 -c "import sys,json; [print('    ',json.loads(l).get('t',''),json.loads(l).get('action',''),json.loads(l).get('detail','')) for l in sys.stdin]" 2>/dev/null || true
+    local _hist
+    _hist=$(tail -20 "$ZMENU_SESSION_LOG" 2>/dev/null | grep -i "$query" | \
+        python3 -c "import sys,json; [print('    ',json.loads(l).get('t',''),json.loads(l).get('action',''),json.loads(l).get('detail','')) for l in sys.stdin]" 2>/dev/null || true)
+    if [[ -n "$_hist" ]]; then
+        echo "$_hist"; _found=true
+    else
+        echo -e "    ${DIM}(no matches)${NC}"
+    fi
     echo ""
+
+    if ! $_found; then
+        echo -e "  ${WARN}  No results for '${query}'"
+        echo ""
+    fi
 
     pause
 }
@@ -8571,7 +8662,9 @@ _menu_help_main() {
     echo ""
     echo "  1) KILL MODE      — Stop runaway processes. Shows top CPU/RAM"
     echo "                      consumers with memory and CPU usage."
-    echo "                      Press a number to send SIGTERM, S for SIGKILL."
+    echo "                      Type a number + k for SIGTERM (e.g. 3k),"
+    echo "                      number + K for SIGKILL (e.g. 5K),"
+    echo "                      number + i for process info (e.g. 2i)."
     echo ""
     echo "  2) AI Engine      — Manage inference backends (Zenny-Core,"
     echo "                      Ollama, OpenCode, LLM-Gateway)."
@@ -8630,14 +8723,14 @@ main_menu() {
         echo ""
         read -rp "  $(printf '%b' "${BOLD}Selection:${NC} ")" choice
         case $choice in
-            1) _session_log "menu_select" "KILL MODE"; mod_kill_mode ;;
-            2) _session_log "menu_select" "AI Engine"; mod_ai_engine ;;
-            3) _session_log "menu_select" "Docker & Services"; mod_apps_services ;;
-            4) _session_log "menu_select" "System Scan"; mod_system_scan ;;
-            5) _session_log "menu_select" "Hardware"; mod_hardware ;;
-            6) _session_log "menu_select" "Find Problems"; mod_find_problems ;;
-            7) _session_log "menu_select" "Projects"; mod_projects ;;
-            8) _session_log "menu_select" "Settings"; mod_settings ;;
+            1) _session_log "menu_select" "KILL MODE" || true; mod_kill_mode ;;
+            2) _session_log "menu_select" "AI Engine" || true; mod_ai_engine ;;
+            3) _session_log "menu_select" "Docker & Services" || true; mod_apps_services ;;
+            4) _session_log "menu_select" "System Scan" || true; mod_system_scan ;;
+            5) _session_log "menu_select" "Hardware" || true; mod_hardware ;;
+            6) _session_log "menu_select" "Find Problems" || true; mod_find_problems ;;
+            7) _session_log "menu_select" "Projects" || true; mod_projects ;;
+            8) _session_log "menu_select" "Settings" || true; mod_settings ;;
             r|R) discover ;;
             /) _search_universal ;;
             \?) _menu_help_main ;;
@@ -8654,11 +8747,12 @@ main_menu() {
 
 _watch_check_thresholds() {
     local alerts=""
-    # GPU temp: strip decimal before integer comparison
+    # GPU temp: strip decimal before integer comparison, guard against non-numeric
     local _gpu_temp_int="${D_GPU_TEMP:-0}"
     _gpu_temp_int="${_gpu_temp_int%%.*}"
-    [[ "$_gpu_temp_int" -gt "${ZMENU_ALERT_GPU_TEMP:-85}" ]] && \
+    if [[ "$_gpu_temp_int" =~ ^[0-9]+$ ]] && [[ "$_gpu_temp_int" -gt "${ZMENU_ALERT_GPU_TEMP:-85}" ]]; then
         alerts+="GPU temp: ${D_GPU_TEMP}°C (threshold: ${ZMENU_ALERT_GPU_TEMP:-85}°C)\n"
+    fi
     local ram_pct=0
     local _mem_total="${D_MEM_TOTAL_MB:-0}"
     local _mem_used="${D_MEM_USED_MB:-0}"
@@ -8677,7 +8771,8 @@ _watch_check_thresholds() {
 
 _watch_alert() {
     local key="$1" message="$2"
-    local state_file="/tmp/zmenu-alert-${key}"
+    # Write state files to ZMENU_HISTORY_DIR (user-owned, not world-writable /tmp)
+    local state_file="${ZMENU_HISTORY_DIR}/.alert-${key}"
     local last_alert=0 now
     now=$(date +%s)
     [[ -f "$state_file" ]] && last_alert=$(cat "$state_file" 2>/dev/null || echo "0")
@@ -8701,7 +8796,12 @@ _watch_discover() {
 
 _watch_mode() {
     cfg_load
-    echo -e "${DIM}  zmenu watch mode — checking every ${ZMENU_WATCH_INTERVAL:-30}s${NC}"
+    local _interval="${ZMENU_WATCH_INTERVAL:-30}"
+    if [[ ! "$_interval" =~ ^[0-9]+$ ]] || [[ "$_interval" -lt 5 ]]; then
+        echo -e "${WARN}  Invalid ZMENU_WATCH_INTERVAL ('$_interval'). Using 30s."
+        _interval=30
+    fi
+    echo -e "${DIM}  zmenu watch mode — checking every ${_interval}s${NC}"
     echo "  Press Ctrl+C to stop"
     echo ""
     while true; do
@@ -8716,7 +8816,7 @@ _watch_mode() {
                 _watch_alert "$key" "$line"
             done <<< "$alerts"
         fi
-        sleep "${ZMENU_WATCH_INTERVAL:-30}"
+        sleep "$_interval"
     done
 }
 

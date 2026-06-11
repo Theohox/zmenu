@@ -1143,6 +1143,11 @@ _zenny_systemd_install() {
         systemctl status "$_ZENNY_SERVICE" --no-pager -l 2>/dev/null | head -10 | sed 's/^/  /'
         return
     fi
+    # Validate paths before writing to systemd (prevent injection via config)
+    if [[ "$ZENNY_BINARY" != /* ]] || [[ "$ZENNY_BINARY" == *$'\n'* ]] || [[ "$ZENNY_LOG" == *$'\n'* ]]; then
+        echo -e "  ${FAIL}  Invalid path in ZENNY_BINARY or ZENNY_LOG — aborting"
+        return 1
+    fi
     echo "  Creating ${_ZENNY_SERVICE_FILE}..."
     sudo tee "$_ZENNY_SERVICE_FILE" > /dev/null << SVCEOF
 [Unit]
@@ -1664,12 +1669,12 @@ _ai_ollama_env_set() {
         sudo mkdir -p "$override_dir" 2>/dev/null || { echo -e "  ${FAIL}  Failed"; return 1; }
     fi
     if [[ ! -f "$override_file" ]]; then
-        sudo bash -c "echo '[Service]' > '${override_file}'" 2>/dev/null
+        printf '%s\n' '[Service]' | sudo tee "$override_file" >/dev/null 2>/dev/null
     fi
     if sudo grep -q "Environment=\"${key}=" "$override_file" 2>/dev/null; then
         sudo sed -i "s|Environment=\"${key}=.*\"|Environment=\"${key}=${val}\"|" "$override_file" 2>/dev/null
     else
-        sudo bash -c "echo 'Environment=\"${key}=${val}\"' >> '${override_file}'" 2>/dev/null
+        printf '%s\n' "Environment=\"${key}=${val}\"" | sudo tee -a "$override_file" >/dev/null 2>/dev/null
     fi
     echo -e "  ${OK}  Set ${key}=${val}"
 }
@@ -4849,35 +4854,76 @@ _search_universal() {
     printf '  Query: '
     local query=""
     IFS= read -r query
-    [[ -z "$query" ]] && return
+    if [[ -z "$query" ]]; then
+        echo -e "  ${DIM}Search cancelled.${NC}"
+        sleep 0.5
+        return
+    fi
     echo ""
+
+    local _found=false
 
     # Processes
     echo -e "  ${BOLD}Processes:${NC}"
-    ps aux 2>/dev/null | grep -i "$query" | grep -v grep | head -5 | \
-        awk '{printf "    %-12s %5.1f%% %6.0f MB  %s\n", $2, $3, $6/1024, $11}' || true
+    local _procs
+    _procs=$(ps aux 2>/dev/null | grep -i "$query" | grep -v grep | head -5 | \
+        awk '{printf "    %-12s %5.1f%% %6.0f MB  %s\n", $2, $3, $6/1024, $11}' 2>/dev/null || true)
+    if [[ -n "$_procs" ]]; then
+        echo "$_procs"; _found=true
+    else
+        echo -e "    ${DIM}(no matches)${NC}"
+    fi
     echo ""
 
     # Services
     echo -e "  ${BOLD}Services:${NC}"
-    printf '%s\n' "${D_SERVICES[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' || true
+    local _svcs
+    _svcs=$(printf '%s\n' "${D_SERVICES[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' 2>/dev/null || true)
+    if [[ -n "$_svcs" ]]; then
+        echo "$_svcs"; _found=true
+    else
+        echo -e "    ${DIM}(no matches)${NC}"
+    fi
     echo ""
 
     # Ports
     echo -e "  ${BOLD}Ports:${NC}"
-    printf '%s\n' "${D_OPEN_PORTS[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' || true
+    local _ports
+    _ports=$(printf '%s\n' "${D_OPEN_PORTS[@]}" 2>/dev/null | grep -i "$query" | sed 's/^/    /' 2>/dev/null || true)
+    if [[ -n "$_ports" ]]; then
+        echo "$_ports"; _found=true
+    else
+        echo -e "    ${DIM}(no matches)${NC}"
+    fi
     echo ""
 
     # Wiki
     echo -e "  ${BOLD}Wiki:${NC}"
-    grep -ri "$query" "$ZMENU_WIKI_DIR"/*.md 2>/dev/null | head -5 | sed 's/^/    /' || true
+    local _wiki
+    _wiki=$(grep -ri "$query" "$ZMENU_WIKI_DIR"/*.md 2>/dev/null | head -5 | sed 's/^/    /' 2>/dev/null || true)
+    if [[ -n "$_wiki" ]]; then
+        echo "$_wiki"; _found=true
+    else
+        echo -e "    ${DIM}(no matches)${NC}"
+    fi
     echo ""
 
     # Session history
     echo -e "  ${BOLD}Recent commands:${NC}"
-    tail -20 "$ZMENU_SESSION_LOG" 2>/dev/null | grep -i "$query" | \
-        python3 -c "import sys,json; [print('    ',json.loads(l).get('t',''),json.loads(l).get('action',''),json.loads(l).get('detail','')) for l in sys.stdin]" 2>/dev/null || true
+    local _hist
+    _hist=$(tail -20 "$ZMENU_SESSION_LOG" 2>/dev/null | grep -i "$query" | \
+        python3 -c "import sys,json; [print('    ',json.loads(l).get('t',''),json.loads(l).get('action',''),json.loads(l).get('detail','')) for l in sys.stdin]" 2>/dev/null || true)
+    if [[ -n "$_hist" ]]; then
+        echo "$_hist"; _found=true
+    else
+        echo -e "    ${DIM}(no matches)${NC}"
+    fi
     echo ""
+
+    if ! $_found; then
+        echo -e "  ${WARN}  No results for '${query}'"
+        echo ""
+    fi
 
     pause
 }
@@ -4892,7 +4938,9 @@ _menu_help_main() {
     echo ""
     echo "  1) KILL MODE      — Stop runaway processes. Shows top CPU/RAM"
     echo "                      consumers with memory and CPU usage."
-    echo "                      Press a number to send SIGTERM, S for SIGKILL."
+    echo "                      Type a number + k for SIGTERM (e.g. 3k),"
+    echo "                      number + K for SIGKILL (e.g. 5K),"
+    echo "                      number + i for process info (e.g. 2i)."
     echo ""
     echo "  2) AI Engine      — Manage inference backends (Zenny-Core,"
     echo "                      Ollama, OpenCode, LLM-Gateway)."

@@ -49,8 +49,7 @@ _APPLY_ALLOWED_PREFIXES=(
 # then validates no dangerous metacharacters exist before executing.
 _apply_safe_exec() {
     local cmd="$1"
-    local -a args=()
-    local arg="" in_quote="" ch escaped=false
+    local -a args=() arg="" in_quote="" ch escaped=false
 
     # Parse command string into array, respecting quotes
     for ((i=0; i<${#cmd}; i++)); do
@@ -102,8 +101,9 @@ _apply_safe_exec() {
         fi
     done
 
-    # Execute safely — no re-parsing, no eval
-    "${args[@]}" 2>/dev/null
+    # Execute safely — no re-parsing, no eval.
+    # Redirect stderr to error log so users see failures (e.g. sudo password prompt)
+    "${args[@]}" 2>>"$ZMENU_ERROR_LOG"
 }
 
 # Extract and run AI-suggested commands safely.
@@ -138,6 +138,7 @@ _apply_generic() {
         return 1
     fi
 
+    local _ran_ok=false
     while IFS= read -r cmd; do
         [[ -z "$cmd" ]] && continue
 
@@ -145,7 +146,29 @@ _apply_generic() {
         #    the shell, or cause duplicate daemon instances.
         local _blocked=false
         local _block_reason=""
-        # Kill zmenu or the current shell
+
+        # 1) Determine the actual command (strip sudo)
+        local _check_cmd="$cmd"
+        [[ "$cmd" == sudo* ]] && _check_cmd="${cmd#sudo }"
+        local _first_word="${_check_cmd%% *}"
+
+        # 2) Allowlist check — first word must be in _APPLY_ALLOWED_PREFIXES
+        local _allowed=false
+        local _prefix
+        for _prefix in "${_APPLY_ALLOWED_PREFIXES[@]}"; do
+            [[ "$_first_word" == "$_prefix" ]] && { _allowed=true; break; }
+        done
+        if ! $_allowed; then
+            _blocked=true; _block_reason="command '$_first_word' is not in the allowlist"
+        fi
+
+        # 3) Block subshell wrappers (bash/sh/python3 with -c)
+        if [[ "$_first_word" == "bash" || "$_first_word" == "sh" || "$_first_word" == "python3" ]] && \
+           [[ "$cmd" == *" -c "* || "$cmd" == *" -c"* ]]; then
+            _blocked=true; _block_reason="subshell with -c not allowed (injection risk)"
+        fi
+
+        # 4) Kill zmenu or the current shell
         if printf '%s' "$cmd" | grep -qE "(pkill|killall|kill)[[:space:]].*zmenu"; then
             _blocked=true; _block_reason="would kill zmenu itself"
         fi
@@ -160,11 +183,27 @@ _apply_generic() {
         if printf '%s' "$cmd" | grep -qE "^[[:space:]]*(zmenu|${ZMENU_INSTALL_PATH})[[:space:]]*\$"; then
             _blocked=true; _block_reason="cannot re-launch zmenu from inside zmenu"
         fi
-        # Destructive rm
-        if printf '%s' "$cmd" | grep -qE "rm[[:space:]]+-[a-z]*r[a-z]*f[[:space:]]+/"; then
-            _blocked=true; _block_reason="destructive recursive rm on root path"
+
+        # 5) Destructive rm — check parsed args, not raw string
+        if [[ "$_first_word" == "rm" ]]; then
+            local _has_r=false _has_f=false _has_root=false
+            local _a
+            for _a in $cmd; do
+                [[ "$_a" == "rm" ]] && continue
+                [[ "$_a" == sudo ]] && continue
+                # Strip quotes for flag detection
+                local _b="${_a//\"/}"
+                _b="${_b//\'/}"
+                [[ "${_b#-}" == *"r"* || "${_b#-}" == *"R"* ]] && _has_r=true
+                [[ "${_b#-}" == *"f"* || "${_b#-}" == *"F"* ]] && _has_f=true
+                [[ "$_b" == "/" || "$_b" == "/"* ]] && _has_root=true
+            done
+            if $_has_r && $_has_f && $_has_root; then
+                _blocked=true; _block_reason="destructive recursive rm on root path"
+            fi
         fi
-        # Command substitution — injection risk
+
+        # 6) Command substitution — injection risk
         if printf '%s' "$cmd" | grep -qE '\$\(.*\)|`.*`'; then
             _blocked=true; _block_reason="command substitution not allowed (injection risk)"
         fi
@@ -177,21 +216,24 @@ _apply_generic() {
             echo -e "  ${FAIL}  BLOCKED: ${cmd}"
             echo -e "  ${DIM}  Reason: ${_block_reason}${NC}"
             _wiki_log_change "$section" "$cmd" "BLOCKED — ${_block_reason}"
-            _session_log "apply" "$cmd" "BLOCKED — ${_block_reason}"
+            _session_log "apply" "$cmd" "BLOCKED — ${_block_reason}" || true
             continue
         fi
 
         echo -e "  ${DIM}Running: ${cmd}${NC}"
         if _apply_safe_exec "$cmd"; then
+            _ran_ok=true
             echo -e "  ${OK}  OK"
             _wiki_log_change "$section" "$cmd" "OK"
-            _session_log "apply" "$cmd" "OK"
+            _session_log "apply" "$cmd" "OK" || true
         else
             echo -e "  ${WARN}  Non-zero: ${cmd}"
             _wiki_log_change "$section" "$cmd" "FAIL"
-            _session_log "apply" "$cmd" "FAIL"
+            _session_log "apply" "$cmd" "FAIL" || true
         fi
     done <<< "$cmds"
+
+    $_ran_ok
 }
 
 # Section-specific wrappers (pass section name for wiki log)
