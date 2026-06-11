@@ -395,51 +395,56 @@ _bp_thermals() {
     fi
 }
 
+# ── Print kernel tuning findings (non-interactive) ────────
+_bp_kernel_findings() {
+    header
+    echo -e "${BCYN}┄ KERNEL TUNING ────────────────────────────────────────${NC}"
+    echo ""
+
+    # vm.swappiness
+    local swappiness; swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "?")
+    if [[ "$swappiness" =~ ^[0-9]+$ ]] && [[ $swappiness -gt 30 ]]; then
+        echo -e "  ${WARN}  vm.swappiness = ${swappiness}  (high)${NC}"
+        echo -e "  ${DIM}  Too eager to swap. For systems with lots of RAM doing AI work, lower is better.${NC}"
+        echo ""
+        echo "   1)  Apply fix: sudo sysctl vm.swappiness=10"
+    else
+        echo -e "  ${OK}  vm.swappiness = ${swappiness}  (good)${NC}"
+    fi
+
+    # vm.dirty_ratio
+    local dirty; dirty=$(sysctl -n vm.dirty_ratio 2>/dev/null || echo "?")
+    if [[ "$dirty" =~ ^[0-9]+$ ]] && [[ $dirty -gt 30 ]]; then
+        echo -e "  ${WARN}  vm.dirty_ratio = ${dirty}  (high)${NC}"
+        echo -e "  ${DIM}  Large dirty page ratio can cause I/O stalls.${NC}"
+        echo ""
+        echo "   2)  Apply fix: sudo sysctl vm.dirty_ratio=10"
+    else
+        echo -e "  ${OK}  vm.dirty_ratio = ${dirty}  (fine)${NC}"
+    fi
+
+    # fs.inotify.max_user_watches
+    local inotify; inotify=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || echo "?")
+    if [[ "$inotify" =~ ^[0-9]+$ ]] && [[ $inotify -lt 524288 ]]; then
+        echo -e "  ${WARN}  fs.inotify.max_user_watches = ${inotify}  (low)${NC}"
+        echo -e "  ${DIM}  Low inotify limit can cause 'no space left on device' errors in dev tools.${NC}"
+        echo ""
+        echo "   3)  Apply fix: raise fs.inotify.max_user_watches to 524288"
+    else
+        echo -e "  ${OK}  fs.inotify.max_user_watches = ${inotify}  (adequate)${NC}"
+    fi
+
+    # Transparent Huge Pages
+    local thp; thp=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo "?")
+    local thp_active; thp_active=$(echo "$thp" | grep -o '\[.*\]' | tr -d '[]')
+    echo -e "  ${OK}  Transparent Huge Pages: ${thp_active:-unknown}${NC}"
+    echo ""
+}
+
+# ── Interactive kernel tuning menu ───────────────────────
 _bp_kernel() {
     while true; do
-        header
-        echo -e "${BCYN}┄ KERNEL TUNING ────────────────────────────────────────${NC}"
-        echo ""
-
-        # vm.swappiness
-        local swappiness; swappiness=$(sysctl -n vm.swappiness 2>/dev/null || echo "?")
-        if [[ "$swappiness" =~ ^[0-9]+$ ]] && [[ $swappiness -gt 30 ]]; then
-            echo -e "  ${WARN}  vm.swappiness = ${swappiness}  (high)${NC}"
-            echo -e "  ${DIM}  Too eager to swap. For systems with lots of RAM doing AI work, lower is better.${NC}"
-            echo ""
-            echo "   1)  Apply fix: sudo sysctl vm.swappiness=10"
-        else
-            echo -e "  ${OK}  vm.swappiness = ${swappiness}  (good)${NC}"
-        fi
-
-        # vm.dirty_ratio
-        local dirty; dirty=$(sysctl -n vm.dirty_ratio 2>/dev/null || echo "?")
-        if [[ "$dirty" =~ ^[0-9]+$ ]] && [[ $dirty -gt 30 ]]; then
-            echo -e "  ${WARN}  vm.dirty_ratio = ${dirty}  (high)${NC}"
-            echo -e "  ${DIM}  Large dirty page ratio can cause I/O stalls.${NC}"
-            echo ""
-            echo "   2)  Apply fix: sudo sysctl vm.dirty_ratio=10"
-        else
-            echo -e "  ${OK}  vm.dirty_ratio = ${dirty}  (fine)${NC}"
-        fi
-
-        # fs.inotify.max_user_watches
-        local inotify; inotify=$(sysctl -n fs.inotify.max_user_watches 2>/dev/null || echo "?")
-        if [[ "$inotify" =~ ^[0-9]+$ ]] && [[ $inotify -lt 524288 ]]; then
-            echo -e "  ${WARN}  fs.inotify.max_user_watches = ${inotify}  (low)${NC}"
-            echo -e "  ${DIM}  Low inotify limit can cause 'no space left on device' errors in dev tools.${NC}"
-            echo ""
-            echo "   3)  Apply fix: raise fs.inotify.max_user_watches to 524288"
-        else
-            echo -e "  ${OK}  fs.inotify.max_user_watches = ${inotify}  (adequate)${NC}"
-        fi
-
-        # Transparent Huge Pages
-        local thp; thp=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo "?")
-        local thp_active; thp_active=$(echo "$thp" | grep -o '\[.*\]' | tr -d '[]')
-        echo -e "  ${OK}  Transparent Huge Pages: ${thp_active:-unknown}${NC}"
-        echo ""
-
+        _bp_kernel_findings
         echo "   r)  Refresh    b)  Back"
         echo ""
         read -rp "  Selection: " ch
@@ -490,7 +495,7 @@ _bp_full_sweep() {
     _bp_docker 2>&1 | grep -v "┄\|^$" | head -30
     _bp_storage 2>&1 | grep -v "┄\|^$" | head -30
     _bp_thermals 2>&1 | grep -v "┄\|^$" | head -20
-    _bp_kernel 2>&1 | grep -v "┄\|^$" | head -20
+    _bp_kernel_findings 2>&1 | grep -v "┄\|^$" | head -30
     _bp_kworkers 2>&1 | grep -v "┄\|^$" | head -20
 
     echo ""
